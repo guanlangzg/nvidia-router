@@ -210,6 +210,30 @@ func TestDiscoverCandidatesPreservesProxyError(t *testing.T) {
 	}
 }
 
+func TestDiscoverCandidatesKeepsOnlyFreeOpenCodeFreeModels(t *testing.T) {
+	service, _, _, discoverer := newCatalogTestService(t)
+	discoverer.models = []string{"vendor/model-a"}
+	gateway := &fakeOpenCodeFreeGateway{models: []string{"gpt-5", "hy3-free", "claude-opus-5", "NEMOTRON-3-ULTRA-FREE"}}
+	service = service.WithOpenCodeFree(gateway)
+
+	candidates, err := service.DiscoverCandidates(context.Background(), 11)
+	if err != nil {
+		t.Fatalf("DiscoverCandidates: %v", err)
+	}
+	// Only -free OpenCodeFree models become candidates, ahead of the NVIDIA
+	// catalog; the gateway's non-free models never surface for selection.
+	got := candidateIDs(candidates)
+	want := []string{"hy3-free", "NEMOTRON-3-ULTRA-FREE", "vendor/model-a"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("candidate IDs = %v, want %v", got, want)
+	}
+	for _, candidate := range candidates {
+		if candidate.Provider == ProviderOpenCodeFree && candidate.Badge != "OpenCodeFree" {
+			t.Errorf("OpenCodeFree candidate %q badge = %q", candidate.UpstreamID, candidate.Badge)
+		}
+	}
+}
+
 func TestWhitelistMapsPublicIDAndDisablesImmediately(t *testing.T) {
 	service, _, _, _ := newCatalogTestService(t)
 	selections := []Selection{
@@ -1205,6 +1229,22 @@ func (d *fakeDiscoverer) AudioSpeech(_ context.Context, _ runtimeconfig.Snapshot
 }
 
 type catalogClock struct{}
+
+type fakeOpenCodeFreeGateway struct {
+	models    []string
+	modelsErr error
+}
+
+func (f *fakeOpenCodeFreeGateway) Models(context.Context) ([]string, error) {
+	if f.modelsErr != nil {
+		return nil, f.modelsErr
+	}
+	return append([]string(nil), f.models...), nil
+}
+
+func (f *fakeOpenCodeFreeGateway) Chat(context.Context, runtimeconfig.Snapshot, []byte, bool) (*http.Response, error) {
+	return nil, errors.New("discovery must not call the gateway chat endpoint")
+}
 
 func (catalogClock) Now() time.Time                              { return time.Date(2026, 7, 30, 4, 0, 0, 0, time.UTC) }
 func (catalogClock) NewTimer(duration time.Duration) *time.Timer { return time.NewTimer(duration) }

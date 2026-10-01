@@ -142,7 +142,7 @@ func TestOpenCodeFreeDiscoveryAndReadOnlyTestJobAreWired(t *testing.T) {
 		switch request.URL.Path {
 		case "/v1/models":
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"data":[{"id":"model-free"}]}`)
+			_, _ = io.WriteString(writer, `{"data":[{"id":"model-free"},{"id":"model-paid"}]}`)
 		case "/v1/chat/completions":
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(writer, `{"choices":[{"message":{"content":"ok"}}]}`)
@@ -186,8 +186,13 @@ func TestOpenCodeFreeDiscoveryAndReadOnlyTestJobAreWired(t *testing.T) {
 	if candidates.StatusCode != http.StatusOK {
 		t.Fatalf("candidates status=%d body=%s", candidates.StatusCode, readResponse(t, candidates))
 	}
-	if body := readResponse(t, candidates); !strings.Contains(body, `"public_id":"opencodefree/model-free"`) {
+	body := readResponse(t, candidates)
+	if !strings.Contains(body, `"public_id":"opencodefree/model-free"`) {
 		t.Fatalf("OpenCodeFree candidate missing: %s", body)
+	}
+	// Non-free gateway models never surface as whitelist candidates.
+	if strings.Contains(body, "model-paid") {
+		t.Fatalf("non-free OpenCodeFree candidate leaked: %s", body)
 	}
 
 	now := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)

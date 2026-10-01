@@ -151,6 +151,11 @@ func (s *Service) DiscoverCandidates(ctx context.Context, keyID int64) ([]Candid
 			return nil, fmt.Errorf("discover OpenCodeFree models: %w", err)
 		}
 		for _, modelID := range modelIDs {
+			// Only free-tier gateway models are callable from this deployment, so
+			// non-free IDs must never surface as whitelist candidates.
+			if !isFreeModelID(modelID) {
+				continue
+			}
 			candidates = append(candidates, candidateFromOpenCodeFree(modelID))
 		}
 	}
