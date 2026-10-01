@@ -243,13 +243,20 @@ func TestCandidateDispatchesOpenCodeFreeWithoutNVIDIAKeys(t *testing.T) {
 		t.Fatalf("gateway calls = %d, want one probe", gateway.chatCalls)
 	}
 	var probe struct {
-		Model string `json:"model"`
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
 	}
 	if err := json.Unmarshal(gateway.chatBodies[0], &probe); err != nil {
 		t.Fatalf("decode probe body: %v", err)
 	}
 	if probe.Model != "mimo-v2.5-free" {
 		t.Fatalf("probe model = %q, want the candidate's upstream id", probe.Model)
+	}
+	// A one-token budget made free-tier models answer 200 with empty content,
+	// which payload validation rightly rejects — working models were condemned
+	// as unreachable. The base probe must match the NVIDIA budget.
+	if probe.MaxTokens != modelProbeMaxTokens {
+		t.Fatalf("probe max_tokens = %d, want %d", probe.MaxTokens, modelProbeMaxTokens)
 	}
 	assertCandidateNotPersisted(t, db, "mimo-v2.5-free")
 }

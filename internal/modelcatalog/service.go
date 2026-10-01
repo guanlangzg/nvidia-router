@@ -471,9 +471,13 @@ func (s *Service) testOpenCodeFreeModel(ctx context.Context, model Model) error 
 		return ErrProviderNotConfigured
 	}
 	body, err := json.Marshal(map[string]any{
-		"model":      model.UpstreamID,
-		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-		"max_tokens": 1,
+		"model":    model.UpstreamID,
+		"messages": []map[string]string{{"role": "user", "content": "ping"}},
+		// modelProbeMaxTokens, not 1: several free-tier models spend their whole
+		// budget before emitting visible text, so a one-token answer comes back
+		// 200 with empty content and fails payload validation. The NVIDIA base
+		// probe and the detailed OCF probe already use this budget.
+		"max_tokens": modelProbeMaxTokens,
 	})
 	if err != nil {
 		return err
