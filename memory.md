@@ -465,3 +465,12 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
 - 白名单现状（运营在本轮会话间自行整理过）：共 3 条启用——NVIDIA `nvidia/nemotron-3-ultra-550b-a55b`、OCF `opencodefree/longcat-2.5-preview-free`、OCF `opencodefree/space-bunny-free`；旧的 deepseek-v4-flash-free/jev/ling 白名单行已被删除。mimo-v2.5-free、nemotron-3-ultra-free 未登记（候选已验证可用，登记与否待运营决定）。
 - 端到端真实验证（临时 Access Key，测试后已删除）：`/v1/models` 200 返回 3 模型；`opencodefree/longcat-2.5-preview-free` 非流式 200/4.5s、流式 200/24 chunks 带 [DONE]；`opencodefree/space-bunny-free` 非流式 200/1.3s。**调用 OCF 模型必须用带 provider 前缀的公开 id（`opencodefree/<model>`），裸模型名 404 model_not_found**。
 - 回滚：恢复 `/opt/opencode-free-proxy/src.bak-pre-fingerprint-20261001`（网关）+ 镜像 `deploy-20261001-candidate-probe-fix-af5b566`（路由器）。
+
+## 41. 2026-10-01 思考参数全盘透传重构发布（370dbc3）
+
+- 用户决策：9router 式纯透传，终结 per-model reasoning 元数据维护成本。提交 `370dbc3`（`refactor: make reasoning parameters pure pass-through`，净删约 1200 行）。
+- 行为变化：`reasoning_effort`/`reasoning`/`thinking` 别名原样转发——删除 `ResolveReasoning`（nearestLevel 档位映射、未知档位 400）、`ApplyReasoning`（Strip+wire format 重注入）、`capThinkingBudget`（预算封顶）、`AutoReasoningSpec`（客户端未发时的注入阶梯）和 validateRequirements 的 reasoning 501 门控；Parse 阶段 reasoning 参数错误/冲突不再拒绝请求（仅观测）。**保留**：Responses→Chat 的参数名映射（mapReasoning）、响应侧 reasoning 归一化读取、观测记录（requested/effective/wire fields，source 恒为 client）、reasoning 501→`AutoReasoningEnabled` 运行时设置保留读写但不再有任何运行时效果（API/前端兼容，前端开关已是摆设——后续可清）。
+- 已知行为变化：off-profile 档位（如 kimi-k3 的 medium）不再本地映射，直接到上游由上游 400 说明支持档位；小预算+思考的空回复风险回到客户端侧（vibe 评测脚本如遇 16-token 空回复需自查 max_tokens）。
+- 门禁：`go test ./...` 全过（删除/改写 9 个测试文件）、go vet、gofmt、git diff --check。提交时误 `git add -A` 带入 `.worktrees/` embedded repo，已 `git rm --cached` + amend 修正并加入 .gitignore——`git add -A` 前先看 status 里未跟踪目录。
+- 标准发布版本 `20261001-reasoning-passthrough-370dbc3`，Release/镜像同名；回滚点 `20261001-ocf-probe-budget-fdbe7bf`；切换前备份 `backups/predeploy-20261001-reasoning-passthrough-370dbc3/router.db`（19,349,504 字节，600，10001:10001）。
+- 线上真实验证（临时 Key，已删）：`opencodefree/longcat-2.5-preview-free` 五场景全 200——effort=high（off-profile，旧版本地 501，现到达上游且返回真实 reasoning_content）、effort=none、无参数回归、thinking 对象、流式+effort=high（17 chunks 带 [DONE]）。启动日志 `unexpressible profiles count=2`（longcat/space-bunny）仍为 advisory 告警，不影响请求。
