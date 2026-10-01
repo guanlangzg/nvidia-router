@@ -22,6 +22,7 @@ import {
 } from './types'
 import type {
   Candidate,
+  CandidateTestState,
   Model,
   ModelTestJob,
   ModelTestJobRequest,
@@ -64,6 +65,12 @@ const deleting = ref(false)
 const errorMessage = ref('')
 const candidateMessage = ref('')
 
+// Candidate probes run read-only straight from the discovery payload, so their
+// verdicts live only in this page state; a refresh or navigation drops them.
+const candidateTestStates = ref<Record<string, CandidateTestState>>({})
+const candidateBatchTesting = ref(false)
+const candidateBatchStopRequested = ref(false)
+
 const providerOptions = computed<string[]>(() => {
   const providers = new Set<string>(['nvidia'])
   for (const model of modelList.value) providers.add(normalizeProvider(model.provider))
@@ -90,6 +97,9 @@ const selectedTestModelList = computed<Model[]>(() => modelList.value.filter(
   (model) => selectedTestModelIds.value.has(model.id),
 ))
 const candidateSelectedCount = computed(() => selectedCandidateKeys.value.size)
+const candidateTestSelectedCount = computed(() => filteredCandidates.value.filter(
+  (candidate) => selectedCandidateKeys.value.has(candidateSelectionKey(candidate)),
+).length)
 const testProgress = computed(() => {
   const job = testJob.value
   if (!job || job.total <= 0) return 0
@@ -402,6 +412,80 @@ async function saveCandidates(): Promise<void> {
   } finally {
     if (!isDisposed()) saving.value = false
   }
+}
+
+async function runCandidateTest(candidate: Candidate): Promise<void> {
+  const key = candidateSelectionKey(candidate)
+  candidateTestStates.value = { ...candidateTestStates.value, [key]: { status: 'running' } }
+  try {
+    const result = await modelsApi.testCandidate({
+      provider: normalizeProvider(candidate.provider),
+      upstream_id: candidate.upstream_id,
+    })
+    if (isDisposed()) return
+    candidateTestStates.value = {
+      ...candidateTestStates.value,
+      [key]: {
+        status: result.status === 'success' ? 'success' : 'failed',
+        duration_ms: result.duration_ms,
+        error: result.error,
+      },
+    }
+  } catch (error) {
+    if (isDisposed()) return
+    candidateTestStates.value = {
+      ...candidateTestStates.value,
+      [key]: {
+        status: 'failed',
+        error: error instanceof ApiError ? error.message : '候选模型测试失败。',
+      },
+    }
+  }
+}
+
+async function testCandidate(candidate: Candidate): Promise<void> {
+  if (candidateBatchTesting.value) return
+  errorMessage.value = ''
+  await runCandidateTest(candidate)
+}
+
+// Batch sweep over the selected candidates with a small fixed concurrency: the
+// backend caps simultaneous probes at 4, so three workers never hit that gate.
+async function testSelectedCandidates(): Promise<void> {
+  if (candidateBatchTesting.value) {
+    candidateBatchStopRequested.value = true
+    return
+  }
+  const targets = filteredCandidates.value.filter(
+    (candidate) => selectedCandidateKeys.value.has(candidateSelectionKey(candidate)),
+  )
+  if (targets.length === 0) {
+    candidateMessage.value = '请先勾选要测试的候选模型。'
+    return
+  }
+  candidateBatchTesting.value = true
+  candidateBatchStopRequested.value = false
+  errorMessage.value = ''
+  candidateMessage.value = `正在测试 ${targets.length} 个候选模型…`
+  const queue = [...targets]
+  const worker = async (): Promise<void> => {
+    while (queue.length > 0) {
+      if (candidateBatchStopRequested.value || isDisposed()) return
+      const candidate = queue.shift()
+      if (!candidate) return
+      await runCandidateTest(candidate)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, queue.length) }, () => worker()))
+  if (isDisposed()) return
+  candidateBatchTesting.value = false
+  const failed = targets.filter((candidate) => {
+    const state = candidateTestStates.value[candidateSelectionKey(candidate)]
+    return state?.status === 'failed'
+  }).length
+  candidateMessage.value = candidateBatchStopRequested.value
+    ? '候选测试已停止。'
+    : `候选测试完成：${targets.length - failed}/${targets.length} 可用。`
 }
 
 async function toggleModel(model: Model): Promise<void> {
@@ -721,6 +805,15 @@ async function cancelCurrentTest(): Promise<void> {
               >
                 全选当前筛选结果
               </UiButton>
+              <UiButton
+                data-testid="test-selected-candidates"
+                :variant="candidateBatchTesting ? 'danger' : 'secondary'"
+                size="sm"
+                :disabled="!candidateBatchTesting && candidateTestSelectedCount === 0"
+                @click="testSelectedCandidates"
+              >
+                {{ candidateBatchTesting ? '停止候选测试' : `测试选中候选 ${candidateTestSelectedCount}` }}
+              </UiButton>
               <span
                 data-testid="model-candidate-count"
                 class="whitespace-nowrap text-xs tabular-nums text-[var(--color-text-muted)]"
@@ -773,6 +866,8 @@ async function cancelCurrentTest(): Promise<void> {
               :busy-id="busyId"
               :selected-model-ids="selectedTestModelIds"
               :selected-candidate-keys="selectedCandidateKeys"
+              :candidate-test-states="candidateTestStates"
+              :candidate-batch-testing="candidateBatchTesting"
               @toggle="toggleModel"
               @unblock="unblockModel"
               @save-context-length="saveContextLength"
@@ -780,6 +875,7 @@ async function cancelCurrentTest(): Promise<void> {
               @toggle-test="toggleTestModel"
               @toggle-candidate="toggleCandidate"
               @test="startSingleTest"
+              @test-candidate="testCandidate"
             />
             <ModelCards
               :models="filteredModels"
@@ -787,12 +883,15 @@ async function cancelCurrentTest(): Promise<void> {
               :busy-id="busyId"
               :selected-model-ids="selectedTestModelIds"
               :selected-candidate-keys="selectedCandidateKeys"
+              :candidate-test-states="candidateTestStates"
+              :candidate-batch-testing="candidateBatchTesting"
               @toggle="toggleModel"
               @unblock="unblockModel"
               @delete="pendingDelete = $event"
               @toggle-test="toggleTestModel"
               @toggle-candidate="toggleCandidate"
               @test="startSingleTest"
+              @test-candidate="testCandidate"
             />
           </template>
 

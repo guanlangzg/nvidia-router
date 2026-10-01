@@ -260,6 +260,20 @@ func (s *Service) TestModelAuto(ctx context.Context, modelID int64) error {
 	if model.Provider == "" {
 		model.Provider = defaultModelProvider
 	}
+	return s.probeByProvider(ctx, model)
+}
+
+// TestCandidate probes a discovery candidate that has no whitelist row yet, so
+// the operator can see whether a model is callable before saving it. It reuses
+// the read-only TestModelAuto probe path and persists nothing.
+func (s *Service) TestCandidate(ctx context.Context, provider, upstreamID string) error {
+	if provider == "" {
+		provider = defaultModelProvider
+	}
+	return s.probeByProvider(ctx, Model{UpstreamID: upstreamID, Provider: provider, Kind: KindChat})
+}
+
+func (s *Service) probeByProvider(ctx context.Context, model Model) error {
 	switch model.Provider {
 	case ProviderNVIDIA:
 		return s.probeNVIDIAModel(ctx, model)

@@ -114,6 +114,37 @@ export interface ModelsResponse {
   data: Model[]
 }
 
+export interface CandidateTestRequest {
+  provider: ModelProvider
+  upstream_id: string
+}
+
+export interface CandidateTestResult {
+  status: 'success' | 'failed' | string
+  duration_ms: number
+  error?: string
+}
+
+// Per-candidate UI state for the read-only probe; keyed by candidateSelectionKey
+// and kept in page state only — a refresh clears it, nothing is persisted.
+export interface CandidateTestState {
+  status: 'running' | 'success' | 'failed'
+  duration_ms?: number
+  error?: string
+}
+
+export function formatTestDuration(durationMs?: number): string {
+  if (durationMs === undefined) return '—'
+  if (durationMs < 1000) return `${Math.round(durationMs)} ms`
+  return `${(durationMs / 1000).toFixed(1)} s`
+}
+
+export function candidateTestSummary(state?: CandidateTestState): string {
+  if (!state || state.status === 'running') return '测试中…'
+  if (state.status === 'success') return `可用 · ${formatTestDuration(state.duration_ms)}`
+  return `不可用${state.error ? ` · ${state.error}` : ''}`
+}
+
 export function normalizeProvider(provider?: string): ModelProvider {
   return provider?.trim().toLowerCase() || 'nvidia'
 }

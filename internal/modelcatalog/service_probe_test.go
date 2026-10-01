@@ -202,6 +202,77 @@ func TestCapabilityProbeRunnerProbesEnabledChatModelsOnly(t *testing.T) {
 	}
 }
 
+// Candidates carry no whitelist row: the probe must work straight from the
+// discovery payload and leave the catalog untouched.
+func TestCandidateProbesWithoutAWhitelistRow(t *testing.T) {
+	service, db, secrets, discoverer := newCatalogTestService(t)
+	secrets.availableIDs = []int64{11}
+	discoverer.chatResponse = `{"choices":[{"message":{"content":"ok"}}]}`
+
+	if err := service.TestCandidate(context.Background(), ProviderNVIDIA, "vendor/fresh-model"); err != nil {
+		t.Fatalf("TestCandidate: %v", err)
+	}
+	if len(secrets.usedKeyIDs) != 1 {
+		t.Fatalf("keys tried = %v, want exactly one", secrets.usedKeyIDs)
+	}
+	assertCandidateNotPersisted(t, db, "vendor/fresh-model")
+}
+
+func TestCandidateReportsWhenNoNVIDIAKeyIsAvailable(t *testing.T) {
+	service, _, _, _ := newCatalogTestService(t)
+
+	if err := service.TestCandidate(context.Background(), ProviderNVIDIA, "vendor/keyless"); !errors.Is(err, ErrNVIDIAKeyRequired) {
+		t.Fatalf("error = %v, want ErrNVIDIAKeyRequired", err)
+	}
+}
+
+// A candidate sweep must not burn NVIDIA keys on OpenCodeFree models, and the
+// probe body must name the candidate's own upstream id.
+func TestCandidateDispatchesOpenCodeFreeWithoutNVIDIAKeys(t *testing.T) {
+	service, db, secrets, _ := newCatalogTestService(t)
+	gateway := &fakeOpenCodeFreeGateway{chatResponse: `{"choices":[{"message":{"content":"ok"}}]}`}
+	service = service.WithOpenCodeFree(gateway)
+
+	if err := service.TestCandidate(context.Background(), ProviderOpenCodeFree, "mimo-v2.5-free"); err != nil {
+		t.Fatalf("TestCandidate: %v", err)
+	}
+	if len(secrets.usedKeyIDs) != 0 {
+		t.Fatalf("OpenCodeFree candidate probe consumed NVIDIA keys %v", secrets.usedKeyIDs)
+	}
+	if gateway.chatCalls != 1 {
+		t.Fatalf("gateway calls = %d, want one probe", gateway.chatCalls)
+	}
+	var probe struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(gateway.chatBodies[0], &probe); err != nil {
+		t.Fatalf("decode probe body: %v", err)
+	}
+	if probe.Model != "mimo-v2.5-free" {
+		t.Fatalf("probe model = %q, want the candidate's upstream id", probe.Model)
+	}
+	assertCandidateNotPersisted(t, db, "mimo-v2.5-free")
+}
+
+func TestCandidateRejectsUnknownProvider(t *testing.T) {
+	service, _, _, _ := newCatalogTestService(t)
+
+	if err := service.TestCandidate(context.Background(), "legacy-gateway", "vendor/x"); !errors.Is(err, ErrProviderNotRoutable) {
+		t.Fatalf("error = %v, want ErrProviderNotRoutable", err)
+	}
+}
+
+func assertCandidateNotPersisted(t *testing.T, db *sql.DB, upstreamID string) {
+	t.Helper()
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE upstream_id = ?`, upstreamID).Scan(&rows); err != nil {
+		t.Fatalf("count models: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("candidate probe persisted %d rows for %q", rows, upstreamID)
+	}
+}
+
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // runOnceForTest exposes one synchronous probe cycle for tests.

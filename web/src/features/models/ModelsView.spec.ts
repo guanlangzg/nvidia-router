@@ -16,6 +16,7 @@ vi.mock('./api', () => ({
     createTestJob: vi.fn(),
     getTestJob: vi.fn(),
     cancelTestJob: vi.fn(),
+    testCandidate: vi.fn(),
   },
 }))
 
@@ -533,5 +534,79 @@ describe('ModelsView', () => {
 
     expect(modelsApi.delete).toHaveBeenCalledWith(8)
     expect(wrapper.text()).not.toContain('To Delete')
+  })
+
+  it('tests a single candidate from its row and shows the verdict', async () => {
+    vi.mocked(modelsApi.candidates).mockResolvedValue({
+      data: [{
+        upstream_id: 'mimo-v2.5-free',
+        display_name: 'Mimo',
+        kind: 'chat',
+        provider: 'opencodefree',
+        supports_vision: false,
+        supports_tools: false,
+        supports_reasoning: false,
+      }],
+    })
+    vi.mocked(modelsApi.testCandidate).mockResolvedValue({ status: 'success', duration_ms: 1234 })
+    const wrapper = mount(ModelsView)
+    await flushPromises()
+    await wrapper.get('[data-testid="discover-models"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="candidate-test-button-opencodefree/mimo-v2.5-free"]').trigger('click')
+    await flushPromises()
+
+    expect(modelsApi.testCandidate).toHaveBeenCalledWith({ provider: 'opencodefree', upstream_id: 'mimo-v2.5-free' })
+    expect(wrapper.text()).toContain('可用 · 1.2 s')
+  })
+
+  it('shows the failure reason when a candidate probe fails', async () => {
+    vi.mocked(modelsApi.candidates).mockResolvedValue({
+      data: [{
+        upstream_id: 'vendor/broken',
+        display_name: 'Broken',
+        kind: 'chat',
+        supports_vision: false,
+        supports_tools: false,
+        supports_reasoning: false,
+      }],
+    })
+    vi.mocked(modelsApi.testCandidate).mockResolvedValue({ status: 'failed', duration_ms: 90, error: '没有可用的 NVIDIA Key' })
+    const wrapper = mount(ModelsView)
+    await flushPromises()
+    await wrapper.get('[data-testid="discover-models"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="candidate-test-button-vendor/broken"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('不可用 · 没有可用的 NVIDIA Key')
+  })
+
+  it('sweeps every selected candidate in a batch and reports the tally', async () => {
+    vi.mocked(modelsApi.candidates).mockResolvedValue({
+      data: [
+        { upstream_id: 'vendor/a', display_name: 'A', kind: 'chat', supports_vision: false, supports_tools: false, supports_reasoning: false },
+        { upstream_id: 'vendor/b', display_name: 'B', kind: 'chat', supports_vision: false, supports_tools: false, supports_reasoning: false },
+        { upstream_id: 'vendor/c', display_name: 'C', kind: 'chat', supports_vision: false, supports_tools: false, supports_reasoning: false },
+      ],
+    })
+    vi.mocked(modelsApi.testCandidate).mockImplementation(async (request) => {
+      if (request.upstream_id === 'vendor/b') {
+        return { status: 'failed', duration_ms: 10, error: '模型测试失败' }
+      }
+      return { status: 'success', duration_ms: 20 }
+    })
+    const wrapper = mount(ModelsView)
+    await flushPromises()
+    await wrapper.get('[data-testid="discover-models"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="select-all-candidates"]').trigger('click')
+    await wrapper.get('[data-testid="test-selected-candidates"]').trigger('click')
+    await flushPromises()
+
+    expect(modelsApi.testCandidate).toHaveBeenCalledTimes(3)
+    expect(wrapper.text()).toContain('候选测试完成：2/3 可用。')
   })
 })

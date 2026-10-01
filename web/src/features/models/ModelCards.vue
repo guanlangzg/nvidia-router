@@ -4,11 +4,12 @@ import UiButton from '../../shared/ui/UiButton.vue'
 import {
   candidatePublicId,
   candidateSelectionKey,
+  candidateTestSummary,
   capabilityLabels,
   normalizeProvider,
   toolsStatusLabel,
 } from './types'
-import type { Candidate, Model } from './types'
+import type { Candidate, CandidateTestState, Model } from './types'
 
 withDefaults(defineProps<{
   models: Model[]
@@ -16,10 +17,14 @@ withDefaults(defineProps<{
   busyId: number | null
   selectedModelIds?: ReadonlySet<number>
   selectedCandidateKeys?: ReadonlySet<string>
+  candidateTestStates?: Record<string, CandidateTestState>
+  candidateBatchTesting?: boolean
 }>(), {
   candidates: () => [],
   selectedModelIds: () => new Set<number>(),
   selectedCandidateKeys: () => new Set<string>(),
+  candidateTestStates: () => ({}),
+  candidateBatchTesting: false,
 })
 const emit = defineEmits<{
   toggle: [model: Model]
@@ -28,6 +33,7 @@ const emit = defineEmits<{
   toggleTest: [model: Model, selected: boolean]
   toggleCandidate: [candidate: Candidate, selected: boolean]
   test: [model: Model]
+  testCandidate: [candidate: Candidate]
 }>()
 
 function audioNeedsVerification(model: Model): boolean {
@@ -123,10 +129,36 @@ function onModelTestChange(model: Model, event: globalThis.Event): void {
               label="待验证"
               :dot="false"
             />
+            <UiBadge
+              v-if="candidateTestStates[candidateSelectionKey(candidate)]?.status === 'running'"
+              variant="info"
+              label="测试中…"
+              :dot="false"
+            />
+            <UiBadge
+              v-else-if="candidateTestStates[candidateSelectionKey(candidate)]"
+              :variant="candidateTestStates[candidateSelectionKey(candidate)]?.status === 'success' ? 'success' : 'danger'"
+              :label="candidateTestSummary(candidateTestStates[candidateSelectionKey(candidate)])"
+              :dot="false"
+            />
           </div>
-          <p class="mt-2 text-xs text-[var(--color-text-muted)]">
-            发现候选 · 保存后保持停用，可参与只读测试
-          </p>
+          <div class="mt-3 flex items-center justify-between gap-2">
+            <p class="min-w-0 truncate text-xs text-[var(--color-text-muted)]">
+              发现候选 · 保存后保持停用，可参与只读测试
+            </p>
+            <UiButton
+              :data-testid="`candidate-test-button-card-${candidateSelectionKey(candidate)}`"
+              variant="ghost"
+              size="sm"
+              class="shrink-0"
+              :loading="candidateTestStates[candidateSelectionKey(candidate)]?.status === 'running'"
+              loading-label="测试中…"
+              :disabled="candidateBatchTesting"
+              @click="emit('testCandidate', candidate)"
+            >
+              测试
+            </UiButton>
+          </div>
         </div>
       </div>
     </article>

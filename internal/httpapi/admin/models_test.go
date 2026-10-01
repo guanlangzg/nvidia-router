@@ -19,20 +19,27 @@ import (
 )
 
 type fakeModels struct {
-	candidates   []modelcatalog.Candidate
-	models       []modelcatalog.Model
-	saved        []modelcatalog.Selection
-	saveResult   *modelcatalog.MutationResult
-	discoverKey  int64
-	cleared      [2]int64
-	deleteCalled int64
-	deleteErr    error
-	patchErr     error
-	saveErr      error
-	listErr      error
-	discoverErr  error
-	verifyErr    error
-	listCalls    int
+	candidates       []modelcatalog.Candidate
+	models           []modelcatalog.Model
+	saved            []modelcatalog.Selection
+	saveResult       *modelcatalog.MutationResult
+	discoverKey      int64
+	cleared          [2]int64
+	deleteCalled     int64
+	deleteErr        error
+	patchErr         error
+	saveErr          error
+	listErr          error
+	discoverErr      error
+	verifyErr        error
+	listCalls        int
+	candidateTested  []string
+	candidateTestErr error
+}
+
+func (f *fakeModels) TestCandidate(_ context.Context, provider, upstreamID string) error {
+	f.candidateTested = append(f.candidateTested, provider+"/"+upstreamID)
+	return f.candidateTestErr
 }
 
 func (f *fakeModels) DeleteModel(_ context.Context, id int64) error {
@@ -455,5 +462,62 @@ func TestModelAPIDeletesModelAndSyncsState(t *testing.T) {
 	}
 	if !containsInt64(syncer.clearedModels, 9) {
 		t.Fatalf("expected model 9 blocks cleared in sync, got %v", syncer.clearedModels)
+	}
+}
+
+func TestModelCandidateTestEndpointRunsReadOnlyProbe(t *testing.T) {
+	service := &fakeModels{}
+	handler := NewModels(service, fakeCandidateKeys{}, &fakeStateSync{})
+
+	response := performAdminRequest(handler, http.MethodPost, "/admin/api/models/candidates/test", `{"provider":"nvidia","upstream_id":"vendor/fresh"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Status     string `json:"status"`
+		DurationMS int64  `json:"duration_ms"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.Status != "success" || result.DurationMS < 0 {
+		t.Fatalf("result = %+v, want success with a non-negative duration", result)
+	}
+	if len(service.candidateTested) != 1 || service.candidateTested[0] != "nvidia/vendor/fresh" {
+		t.Fatalf("probed = %v, want [nvidia/vendor/fresh]", service.candidateTested)
+	}
+}
+
+func TestModelCandidateTestEndpointReportsFailureReason(t *testing.T) {
+	handler := NewModels(&fakeModels{candidateTestErr: modelcatalog.ErrNVIDIAKeyRequired}, fakeCandidateKeys{}, &fakeStateSync{})
+
+	response := performAdminRequest(handler, http.MethodPost, "/admin/api/models/candidates/test", `{"provider":"nvidia","upstream_id":"vendor/fresh"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"status":"failed"`) || !strings.Contains(body, safeModelTestError(modelcatalog.ErrNVIDIAKeyRequired)) {
+		t.Fatalf("body = %s, want failed with the safe error text", body)
+	}
+}
+
+func TestModelCandidateTestEndpointRejectsInvalidInput(t *testing.T) {
+	handler := NewModels(&fakeModels{}, fakeCandidateKeys{}, &fakeStateSync{})
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "unknown provider", body: `{"provider":"legacy","upstream_id":"vendor/x"}`},
+		{name: "missing provider", body: `{"upstream_id":"vendor/x"}`},
+		{name: "empty upstream id", body: `{"provider":"nvidia","upstream_id":"  "}`},
+		{name: "control character", body: "{\"provider\":\"nvidia\",\"upstream_id\":\"vendor\\n/x\"}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := performAdminRequest(handler, http.MethodPost, "/admin/api/models/candidates/test", test.body)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_request") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }

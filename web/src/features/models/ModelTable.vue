@@ -6,11 +6,12 @@ import UiButton from '../../shared/ui/UiButton.vue'
 import {
   candidatePublicId,
   candidateSelectionKey,
+  candidateTestSummary,
   capabilityLabels,
   normalizeProvider,
   toolsStatusLabel,
 } from './types'
-import type { Candidate, Model } from './types'
+import type { Candidate, CandidateTestState, Model } from './types'
 
 withDefaults(defineProps<{
   models: Model[]
@@ -18,10 +19,14 @@ withDefaults(defineProps<{
   busyId: number | null
   selectedModelIds?: ReadonlySet<number>
   selectedCandidateKeys?: ReadonlySet<string>
+  candidateTestStates?: Record<string, CandidateTestState>
+  candidateBatchTesting?: boolean
 }>(), {
   candidates: () => [],
   selectedModelIds: () => new Set<number>(),
   selectedCandidateKeys: () => new Set<string>(),
+  candidateTestStates: () => ({}),
+  candidateBatchTesting: false,
 })
 const emit = defineEmits<{
   toggle: [model: Model]
@@ -31,6 +36,7 @@ const emit = defineEmits<{
   toggleTest: [model: Model, selected: boolean]
   toggleCandidate: [candidate: Candidate, selected: boolean]
   test: [model: Model]
+  testCandidate: [candidate: Candidate]
 }>()
 
 // Same inline-edit pattern for the operator-owned context window declaration.
@@ -277,12 +283,36 @@ function onModelTestChange(model: Model, event: globalThis.Event): void {
                 :variant="candidate.reasoning_status === 'unknown' ? 'warning' : 'muted'"
                 :label="candidateStatus(candidate, selectedCandidateKeys.has(candidateSelectionKey(candidate)))"
               />
+              <UiBadge
+                v-if="candidateTestStates[candidateSelectionKey(candidate)]?.status === 'running'"
+                class="mt-1.5"
+                variant="info"
+                label="测试中…"
+                :dot="false"
+              />
+              <UiBadge
+                v-else-if="candidateTestStates[candidateSelectionKey(candidate)]"
+                class="mt-1.5"
+                :variant="candidateTestStates[candidateSelectionKey(candidate)]?.status === 'success' ? 'success' : 'danger'"
+                :label="candidateTestSummary(candidateTestStates[candidateSelectionKey(candidate)])"
+                :dot="false"
+              />
               <p class="mt-1.5 text-xs text-[var(--color-text-muted)]">
                 保存后保持停用，可参与只读测试
               </p>
             </td>
-            <td class="data-table-td text-right text-xs text-[var(--color-text-subtle)]">
-              候选发现
+            <td class="data-table-td text-right">
+              <UiButton
+                :data-testid="`candidate-test-button-${candidateSelectionKey(candidate)}`"
+                variant="ghost"
+                size="sm"
+                :loading="candidateTestStates[candidateSelectionKey(candidate)]?.status === 'running'"
+                loading-label="测试中…"
+                :disabled="candidateBatchTesting"
+                @click="emit('testCandidate', candidate)"
+              >
+                测试
+              </UiButton>
             </td>
           </tr>
           <tr

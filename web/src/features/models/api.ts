@@ -1,6 +1,8 @@
 import { apiRequest } from '../../shared/api/client'
 import type {
   Candidate,
+  CandidateTestRequest,
+  CandidateTestResult,
   Model,
   ModelPatch,
   ModelsResponse,
@@ -20,6 +22,7 @@ export interface ModelsApi {
   createTestJob(request: ModelTestJobRequest): Promise<ModelTestJob>
   getTestJob(id: string | number): Promise<ModelTestJob>
   cancelTestJob(id: string | number): Promise<ModelTestJob | void>
+  testCandidate(request: CandidateTestRequest): Promise<CandidateTestResult>
 }
 
 export const modelsApi: ModelsApi = {
@@ -50,10 +53,15 @@ export const modelsApi: ModelsApi = {
   cancelTestJob(id) {
     return apiRequest(`/admin/api/model-test-jobs/${encodeURIComponent(String(id))}`, { method: 'DELETE' })
   },
+  testCandidate(request) {
+    return apiRequest('/admin/api/models/candidates/test', { method: 'POST', body: request })
+  },
 }
 
 export type {
   Candidate,
+  CandidateTestRequest,
+  CandidateTestResult,
   Model,
   ModelPatch,
   ModelTestJob,

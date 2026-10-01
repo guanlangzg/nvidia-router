@@ -1231,8 +1231,13 @@ func (d *fakeDiscoverer) AudioSpeech(_ context.Context, _ runtimeconfig.Snapshot
 type catalogClock struct{}
 
 type fakeOpenCodeFreeGateway struct {
-	models    []string
-	modelsErr error
+	models     []string
+	modelsErr  error
+	chatCalls  int
+	chatBodies [][]byte
+	// chatResponse, when set, makes Chat answer 200 with that body so the
+	// candidate-probe path can be exercised; empty keeps Chat refusing.
+	chatResponse string
 }
 
 func (f *fakeOpenCodeFreeGateway) Models(context.Context) ([]string, error) {
@@ -1242,8 +1247,14 @@ func (f *fakeOpenCodeFreeGateway) Models(context.Context) ([]string, error) {
 	return append([]string(nil), f.models...), nil
 }
 
-func (f *fakeOpenCodeFreeGateway) Chat(context.Context, runtimeconfig.Snapshot, []byte, bool) (*http.Response, error) {
-	return nil, errors.New("discovery must not call the gateway chat endpoint")
+func (f *fakeOpenCodeFreeGateway) Chat(_ context.Context, _ runtimeconfig.Snapshot, probeBody []byte, _ bool) (*http.Response, error) {
+	f.chatCalls++
+	f.chatBodies = append(f.chatBodies, append([]byte(nil), probeBody...))
+	if f.chatResponse == "" {
+		return nil, errors.New("discovery must not call the gateway chat endpoint")
+	}
+	reader := io.NopCloser(strings.NewReader(f.chatResponse))
+	return &http.Response{StatusCode: http.StatusOK, Body: reader, Header: make(http.Header)}, nil
 }
 
 func (catalogClock) Now() time.Time                              { return time.Date(2026, 7, 30, 4, 0, 0, 0, time.UTC) }

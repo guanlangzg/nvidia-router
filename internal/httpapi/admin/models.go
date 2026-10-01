@@ -21,6 +21,7 @@ type modelManager interface {
 	PatchResult(context.Context, int64, modelcatalog.Patch) (modelcatalog.Model, modelcatalog.Kind, error)
 	VerifyAndUnblock(context.Context, int64, int64) (modelcatalog.Model, error)
 	DeleteModel(context.Context, int64) error
+	TestCandidate(context.Context, string, string) error
 }
 
 type modelVerificationDTO struct {
@@ -42,7 +43,14 @@ type Models struct {
 	keys       candidateKeySource
 	sync       modelStateSync
 	mutationMu sync.Mutex
+	// testSlots bounds how many candidate probes may hit the upstreams at once,
+	// so one unruly admin client cannot fan out an unbounded probe storm.
+	testSlots chan struct{}
 }
+
+// candidateTestMaxConcurrency matches the busiest mode the test-job runner
+// offers, keeping candidate sweeps no heavier than whitelist batch tests.
+const candidateTestMaxConcurrency = 4
 
 type candidateDTO struct {
 	PublicID                string            `json:"public_id"`
@@ -116,13 +124,15 @@ type selectionDTO struct {
 }
 
 func NewModels(service modelManager, keys candidateKeySource, syncer modelStateSync) *Models {
-	return &Models{service: service, keys: keys, sync: syncer}
+	return &Models{service: service, keys: keys, sync: syncer, testSlots: make(chan struct{}, candidateTestMaxConcurrency)}
 }
 
 func (h *Models) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	switch {
 	case request.URL.Path == "/admin/api/models/candidates" && request.Method == http.MethodGet:
 		h.candidates(writer, request)
+	case request.URL.Path == "/admin/api/models/candidates/test" && request.Method == http.MethodPost:
+		h.testCandidate(writer, request)
 	case request.URL.Path == "/admin/api/models" && request.Method == http.MethodGet:
 		h.list(writer, request)
 	case request.URL.Path == "/admin/api/models" && request.Method == http.MethodPost:
@@ -167,6 +177,67 @@ func (h *Models) candidates(writer http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"data": data})
 }
+
+type candidateTestRequest struct {
+	Provider   string `json:"provider"`
+	UpstreamID string `json:"upstream_id"`
+}
+
+type candidateTestResultDTO struct {
+	Status     string `json:"status"`
+	DurationMS int64  `json:"duration_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
+// testCandidate answers "is this not-yet-saved candidate callable?" with one
+// read-only probe. The verdict is synchronous and never persisted: candidates
+// have no whitelist row, so there is nowhere to store capability results.
+func (h *Models) testCandidate(writer http.ResponseWriter, request *http.Request) {
+	var input candidateTestRequest
+	if err := decodeJSON(writer, request, &input); err != nil {
+		writeInvalidRequest(writer, "The candidate test request is invalid.", err)
+		return
+	}
+	upstreamID, err := validateCandidateTestInput(input)
+	if err != nil {
+		writeInvalidRequest(writer, "The candidate test request is invalid.", err)
+		return
+	}
+	select {
+	case h.testSlots <- struct{}{}:
+		defer func() { <-h.testSlots }()
+	case <-request.Context().Done():
+		return
+	}
+	started := time.Now()
+	err = h.service.TestCandidate(request.Context(), input.Provider, upstreamID)
+	duration := time.Since(started).Milliseconds()
+	result := candidateTestResultDTO{DurationMS: duration}
+	if err != nil {
+		result.Status = "failed"
+		result.Error = safeModelTestError(err)
+	} else {
+		result.Status = "success"
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func validateCandidateTestInput(input candidateTestRequest) (string, error) {
+	switch input.Provider {
+	case modelcatalog.ProviderNVIDIA, modelcatalog.ProviderOpenCodeFree:
+	default:
+		return "", errors.New("provider must be nvidia or opencodefree")
+	}
+	upstreamID := strings.TrimSpace(input.UpstreamID)
+	if upstreamID == "" || len(upstreamID) > 200 {
+		return "", errors.New("upstream_id must be 1-200 characters")
+	}
+	if strings.ContainsFunc(upstreamID, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return "", errors.New("upstream_id must not contain control characters")
+	}
+	return upstreamID, nil
+}
+
 func (h *Models) list(writer http.ResponseWriter, request *http.Request) {
 	items, err := h.service.List(request.Context())
 	if err != nil {
