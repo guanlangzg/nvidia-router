@@ -484,14 +484,23 @@ func TestResolveEnforcesKindAndCapabilities(t *testing.T) {
 	for _, requirements := range []Requirements{
 		{Kind: KindChat, Vision: true},
 		{Kind: KindChat, Tools: true},
+		// Reasoning is pass-through: the flag is observability-only, so a
+		// non-reasoning model must still resolve when a client names the alias.
 		{Kind: KindChat, Reasoning: true},
 	} {
 		if _, err := service.Resolve(context.Background(), "capable", requirements); err != nil {
 			t.Fatalf("Resolve capable %+v: %v", requirements, err)
 		}
+		if requirements.Reasoning {
+			continue
+		}
 		if _, err := service.Resolve(context.Background(), "plain", requirements); !errors.Is(err, ErrCapabilityUnsupported) {
 			t.Fatalf("Resolve plain %+v error = %v", requirements, err)
 		}
+	}
+	// ...and the non-reasoning model admits a reasoning request too.
+	if _, err := service.Resolve(context.Background(), "plain", Requirements{Kind: KindChat, Reasoning: true}); err != nil {
+		t.Fatalf("Resolve plain reasoning: %v", err)
 	}
 	if _, err := service.Resolve(context.Background(), "embedding", Requirements{Kind: KindChat}); !errors.Is(err, ErrModelKindMismatch) {
 		t.Fatalf("kind mismatch error = %v", err)
@@ -512,7 +521,6 @@ func TestResolveNamesUnsupportedCapability(t *testing.T) {
 		capability   string
 	}{
 		{name: "vision", requirements: Requirements{Kind: KindChat, Vision: true}, capability: "vision"},
-		{name: "reasoning", requirements: Requirements{Kind: KindChat, Reasoning: true}, capability: "reasoning"},
 		{name: "tools", requirements: Requirements{Kind: KindChat, Tools: true}, capability: "tools"},
 	}
 	for _, testCase := range tests {

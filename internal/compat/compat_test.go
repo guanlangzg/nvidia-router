@@ -36,56 +36,6 @@ func TestFlattenToolOutputUsesSafeCompatibleText(t *testing.T) {
 	}
 }
 
-func TestResolveReasoningClampsToModelProfile(t *testing.T) {
-	spec, err := ParseReasoning(map[string]json.RawMessage{"reasoning_effort": json.RawMessage(`"high"`)})
-	if err != nil {
-		t.Fatalf("ParseReasoning: %v", err)
-	}
-	decision, err := ResolveReasoning(spec, ReasoningProfile{
-		Supported:      true,
-		Levels:         []ReasoningLevel{ReasoningLow, ReasoningMedium},
-		MinBudget:      512,
-		MaxBudget:      8192,
-		ZeroAllowed:    true,
-		DynamicAllowed: false,
-	})
-	if err != nil {
-		t.Fatalf("ResolveReasoning: %v", err)
-	}
-	if decision.RequestedLevel != ReasoningHigh || decision.EffectiveLevel != ReasoningMedium || decision.EffectiveBudget != 8192 {
-		t.Fatalf("decision = %+v, want high -> medium/8192", decision)
-	}
-}
-
-func TestApplyReasoningPreservesExplicitNativeThinking(t *testing.T) {
-	fields := map[string]json.RawMessage{
-		"thinking": json.RawMessage(`{"type":"enabled","budget_tokens":24576}`),
-	}
-	spec, err := ParseReasoning(fields)
-	if err != nil {
-		t.Fatalf("ParseReasoning: %v", err)
-	}
-	decision, err := ResolveReasoning(spec, ReasoningProfile{
-		Supported: true, Levels: []ReasoningLevel{ReasoningLow, ReasoningMedium},
-		MaxBudget: 8192, DynamicAllowed: false, WireFormat: "openai",
-	})
-	if err != nil {
-		t.Fatalf("ResolveReasoning: %v", err)
-	}
-	if err := ApplyReasoning(fields, decision, ReasoningProfile{
-		Supported: true, Levels: []ReasoningLevel{ReasoningLow, ReasoningMedium},
-		MaxBudget: 8192, DynamicAllowed: false, WireFormat: "openai",
-	}); err != nil {
-		t.Fatalf("ApplyReasoning: %v", err)
-	}
-	if got := string(fields["thinking"]); got != `{"budget_tokens":8192,"type":"enabled"}` {
-		t.Fatalf("thinking = %s, want native thinking object", got)
-	}
-	if _, ok := fields["reasoning_effort"]; ok {
-		t.Fatal("reasoning_effort was synthesized for explicit native thinking")
-	}
-}
-
 func TestParseReasoningRejectsConflictingAliases(t *testing.T) {
 	_, err := ParseReasoning(map[string]json.RawMessage{
 		"reasoning_effort": json.RawMessage(`"low"`),
@@ -93,49 +43,6 @@ func TestParseReasoningRejectsConflictingAliases(t *testing.T) {
 	})
 	if !errors.Is(err, ErrAmbiguousReasoning) {
 		t.Fatalf("error = %v, want ErrAmbiguousReasoning", err)
-	}
-}
-
-func TestResolveReasoningAutoPrefersAutoLevelOverNone(t *testing.T) {
-	// Regression: an explicit auto request was mapped through budget distance
-	// and collapsed to none (requestedBudget=-1 sits closest to 0) on dynamic
-	// profiles. Auto must be preserved as the effective level.
-	spec, err := ParseReasoning(map[string]json.RawMessage{"reasoning_effort": json.RawMessage(`"auto"`)})
-	if err != nil {
-		t.Fatalf("ParseReasoning: %v", err)
-	}
-	decision, err := ResolveReasoning(spec, ReasoningProfile{
-		Supported: true, Levels: []ReasoningLevel{ReasoningNone, ReasoningAuto, ReasoningMedium, ReasoningHigh},
-		ZeroAllowed: true, DynamicAllowed: true, WireFormat: "openai",
-	})
-	if err != nil {
-		t.Fatalf("ResolveReasoning: %v", err)
-	}
-	if decision.EffectiveLevel != ReasoningAuto {
-		t.Fatalf("EffectiveLevel = %q, want auto", decision.EffectiveLevel)
-	}
-	if decision.Downgraded {
-		t.Fatal("explicit auto was marked as downgraded")
-	}
-}
-
-func TestResolveReasoningConcreteLevelPrefersRequestedLevelOverAuto(t *testing.T) {
-	spec, err := ParseReasoning(map[string]json.RawMessage{"reasoning_effort": json.RawMessage(`"low"`)})
-	if err != nil {
-		t.Fatalf("ParseReasoning: %v", err)
-	}
-	decision, err := ResolveReasoning(spec, ReasoningProfile{
-		Supported: true, Levels: []ReasoningLevel{ReasoningNone, ReasoningAuto, ReasoningLow, ReasoningMedium},
-		ZeroAllowed: true, DynamicAllowed: true, WireFormat: "openai",
-	})
-	if err != nil {
-		t.Fatalf("ResolveReasoning: %v", err)
-	}
-	if decision.EffectiveLevel != ReasoningLow || decision.EffectiveBudget != 1024 {
-		t.Fatalf("decision = %+v, want low/1024", decision)
-	}
-	if decision.Downgraded {
-		t.Fatal("exact concrete level was marked as downgraded")
 	}
 }
 

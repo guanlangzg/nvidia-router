@@ -21,7 +21,6 @@ type prepareRequestFake struct {
 	marshalErr    error
 	marshalCalled bool
 	gotModel      modelcatalog.Model
-	gotAuto       bool
 }
 
 func (f *prepareRequestFake) PublicModelID() string { return f.modelID }
@@ -34,10 +33,9 @@ func (f *prepareRequestFake) RequestedReasoningLevel() string { return f.request
 
 func (f *prepareRequestFake) ReasoningRequested() bool { return f.reasoning }
 
-func (f *prepareRequestFake) MarshalForWithOptions(model modelcatalog.Model, auto bool) ([]byte, error) {
+func (f *prepareRequestFake) MarshalForWithOptions(model modelcatalog.Model) ([]byte, error) {
 	f.marshalCalled = true
 	f.gotModel = model
-	f.gotAuto = auto
 	if f.marshalErr != nil {
 		return nil, f.marshalErr
 	}
@@ -70,7 +68,7 @@ func TestPrepareModelRequestSuccessPreservesResolveAndReasoningMetadata(t *testi
 		}
 		gotRequirements = got
 		return model, nil
-	}), true)
+	}))
 	if err != nil {
 		t.Fatalf("prepareModelRequest: %v", err)
 	}
@@ -80,8 +78,8 @@ func TestPrepareModelRequestSuccessPreservesResolveAndReasoningMetadata(t *testi
 	if !reflect.DeepEqual(prepared.Model, model) || prepared.Stream != request.stream || !reflect.DeepEqual(prepared.Body, request.body) {
 		t.Fatalf("prepared result = %#v, want model/body/stream preserved", prepared)
 	}
-	if !request.marshalCalled || !request.gotAuto {
-		t.Fatalf("marshal call = called:%v auto:%v, want called=true auto=true", request.marshalCalled, request.gotAuto)
+	if !request.marshalCalled {
+		t.Fatal("marshal call = not called, want called")
 	}
 	snapshot := state.Snapshot()
 	if snapshot.ModelID != request.modelID || !snapshot.IsStream {
@@ -92,37 +90,13 @@ func TestPrepareModelRequestSuccessPreservesResolveAndReasoningMetadata(t *testi
 	}
 }
 
-func TestPrepareModelRequestAutoReasoningUsesModelAndRecordsSource(t *testing.T) {
-	ctx, state := prepareContext()
-	request := &prepareRequestFake{
-		modelID: "public/model", body: []byte(`{"model":"upstream/model","reasoning_effort":"medium"}`),
-	}
-	model := modelcatalog.Model{ID: 7, PublicID: request.modelID, UpstreamID: "upstream/model", Kind: modelcatalog.KindChat, Enabled: true, SupportsReasoning: true}
-	prepared, err := prepareModelRequest(ctx, request, prepareResolverFunc(func(context.Context, string, modelcatalog.Requirements) (modelcatalog.Model, error) {
-		return model, nil
-	}), true)
-	if err != nil {
-		t.Fatalf("prepareModelRequest: %v", err)
-	}
-	if prepared.ReasoningSource != "auto-inject" {
-		t.Fatalf("reasoning source = %q, want auto-inject", prepared.ReasoningSource)
-	}
-	if !request.gotAuto {
-		t.Fatal("marshal autoReasoning = false, want true")
-	}
-	snapshot := state.Snapshot()
-	if snapshot.ReasoningSource != "auto-inject" || snapshot.ReasoningEffectiveLevel != "medium" {
-		t.Fatalf("reasoning observation = source:%q effective:%q", snapshot.ReasoningSource, snapshot.ReasoningEffectiveLevel)
-	}
-}
-
 func TestPrepareModelRequestResolveFailureRecordsCapabilityCodeAndSkipsMarshal(t *testing.T) {
 	ctx, state := prepareContext()
 	request := &prepareRequestFake{modelID: "public/model", stream: true, requested: "low", reasoning: true, body: []byte(`{}`)}
 	resolveErr := modelcatalog.ErrCapabilityUnverified
 	_, err := prepareModelRequest(ctx, request, prepareResolverFunc(func(context.Context, string, modelcatalog.Requirements) (modelcatalog.Model, error) {
 		return modelcatalog.Model{}, resolveErr
-	}), false)
+	}))
 	var publicErr *apierror.Error
 	if err == nil || !errors.As(err, &publicErr) || publicErr.Code != "capability_unverified" {
 		t.Fatalf("error = %v, want mapped capability error", err)
@@ -146,7 +120,7 @@ func TestPrepareModelRequestMarshalFailureSkipsProviderAndEffectiveReasoning(t *
 	model := modelcatalog.Model{ID: 9, PublicID: request.modelID, UpstreamID: "upstream/model", Kind: modelcatalog.KindChat, Enabled: true}
 	_, err := prepareModelRequest(ctx, request, prepareResolverFunc(func(context.Context, string, modelcatalog.Requirements) (modelcatalog.Model, error) {
 		return model, nil
-	}), false)
+	}))
 	if !errors.Is(err, marshalErr) {
 		t.Fatalf("error = %v, want %v", err, marshalErr)
 	}
@@ -154,7 +128,7 @@ func TestPrepareModelRequestMarshalFailureSkipsProviderAndEffectiveReasoning(t *
 		t.Fatal("MarshalForWithOptions was not called")
 	}
 	snapshot := state.Snapshot()
-	if snapshot.ReasoningEffectiveLevel != "" || snapshot.ReasoningSource != "" || snapshot.ReasoningRequested {
-		t.Fatalf("reasoning observation after marshal failure = requested:%v source:%q effective:%q", snapshot.ReasoningRequested, snapshot.ReasoningSource, snapshot.ReasoningEffectiveLevel)
+	if snapshot.ReasoningEffectiveLevel != "" || snapshot.ReasoningRequested {
+		t.Fatalf("reasoning observation after marshal failure = requested:%v effective:%q", snapshot.ReasoningRequested, snapshot.ReasoningEffectiveLevel)
 	}
 }

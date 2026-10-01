@@ -23,18 +23,30 @@ func TestParseNormalizesFlatFunctionToolsForChatUpstream(t *testing.T) {
 	}
 }
 
-func TestParseRejectsConflictingReasoningAliases(t *testing.T) {
-	_, err := Parse([]byte(`{"model":"public-model","messages":[{"role":"user","content":"think"}],"reasoning_effort":"low","thinking":{"type":"enabled","budget_tokens":8192}}`))
-	if err == nil || !containsChatError(err, "invalid_parameter", "reasoning") {
-		t.Fatalf("error = %v, want invalid reasoning alias error", err)
+// Reasoning aliases are pass-through: conflicting or off-profile values are the
+// upstream's problem, so Parse accepts them and MarshalFor forwards them.
+func TestParseAcceptsConflictingReasoningAliases(t *testing.T) {
+	payload := []byte(`{"model":"public-model","messages":[{"role":"user","content":"think"}],"reasoning_effort":"low","thinking":{"type":"enabled","budget_tokens":8192}}`)
+	request, err := Parse(payload)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(modelcatalog.Model{PublicID: "public-model", UpstreamID: "vendor/model", Kind: modelcatalog.KindChat, Enabled: true})
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"reasoning_effort":"low"`)) || !bytes.Contains(body, []byte(`"budget_tokens":8192`)) {
+		t.Fatalf("reasoning aliases were not forwarded verbatim: %s", body)
 	}
 }
 
-func TestMarshalForClampsReasoningToModelProfile(t *testing.T) {
+func TestMarshalForForwardsReasoningVerbatimRegardlessOfProfile(t *testing.T) {
 	request, err := Parse([]byte(`{"model":"public-model","messages":[{"role":"user","content":"think"}],"reasoning_effort":"high"}`))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
+	// The profile disagrees with the request (thinking wire format, no high
+	// level) — pass-through means the request still reaches the upstream as-is.
 	model := modelcatalog.Model{
 		PublicID: "public-model", UpstreamID: "vendor/model", Kind: modelcatalog.KindChat, Enabled: true,
 		SupportsReasoning: true, ReasoningWireFormat: "thinking", ReasoningLevels: []string{"low", "medium"},
@@ -48,8 +60,11 @@ func TestMarshalForClampsReasoningToModelProfile(t *testing.T) {
 	if err := json.Unmarshal(body, &fields); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if got := string(fields["thinking"]); got != `{"budget_tokens":8192,"type":"enabled"}` {
-		t.Fatalf("thinking = %s, want medium profile budget", got)
+	if got := string(fields["reasoning_effort"]); got != `"high"` {
+		t.Fatalf("reasoning_effort = %s, want the client value forwarded verbatim", got)
+	}
+	if _, ok := fields["thinking"]; ok {
+		t.Fatal("thinking was synthesized from the model profile")
 	}
 }
 

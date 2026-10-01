@@ -446,33 +446,6 @@ func TestChatCapabilityRejectionRecordsRequestedCapability(t *testing.T) {
 	}
 }
 
-func TestChatMarshalCapabilityErrorRecordsErrorCode(t *testing.T) {
-	resolver := modelResolverFunc(func(_ context.Context, _ string, _ modelcatalog.Requirements) (modelcatalog.Model, error) {
-		return modelcatalog.Model{
-			ID: 3, PublicID: "public-model", UpstreamID: "vendor/model", Kind: modelcatalog.KindChat,
-			Enabled: true, SupportsReasoning: true, ReasoningWireFormat: "openai",
-			ReasoningLevels: []string{"none"}, ReasoningZeroAllowed: false,
-		}, nil
-	})
-	var recorded observability.RequestRecord
-	recorder := requestRecorderFunc(func(_ context.Context, record observability.RequestRecord) error {
-		recorded = record
-		return nil
-	})
-	handler := observability.HTTPMiddleware(recorder, clock.RealClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), NewChat(resolver, nil, nil))
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
-		`{"model":"public-model","messages":[{"role":"user","content":"think"}],"reasoning_effort":"high"}`,
-	))
-
-	handler.ServeHTTP(response, request)
-
-	assertChatError(t, response, http.StatusNotImplemented, "model_capability_unsupported")
-	if recorded.ErrorCode == nil || *recorded.ErrorCode != "model_capability_unsupported" {
-		t.Fatalf("recorded error code = %v, want model_capability_unsupported", recorded.ErrorCode)
-	}
-}
-
 // inferred tools_status is an explicit capability claim (operator PATCH or the
 // capability-hint registry), so a tools request must route upstream instead of
 // deadlocking on 501 capability_unverified — several gateway models can never
@@ -1070,8 +1043,10 @@ func TestChatNonstreamRecordsReasoningRequestAndResponse(t *testing.T) {
 	if recorded.ReasoningRequestedLevel != "high" {
 		t.Fatalf("reasoning_requested_level = %q, want high", recorded.ReasoningRequestedLevel)
 	}
-	if recorded.ReasoningEffectiveLevel != "medium" {
-		t.Fatalf("reasoning_effective_level = %q, want medium", recorded.ReasoningEffectiveLevel)
+	// Pass-through: the effective level is whatever the client asked for — the
+	// model profile no longer downgrades it.
+	if recorded.ReasoningEffectiveLevel != "high" {
+		t.Fatalf("reasoning_effective_level = %q, want high", recorded.ReasoningEffectiveLevel)
 	}
 	if recorded.ReasoningSource != "client" {
 		t.Fatalf("reasoning_source = %q, want client", recorded.ReasoningSource)
@@ -1085,8 +1060,8 @@ func TestChatNonstreamRecordsReasoningRequestAndResponse(t *testing.T) {
 		t.Fatalf("upstream model = %q, want vendor/model", upstreamModel)
 	}
 	var upstreamReasoning string
-	if err := json.Unmarshal(upstreamPayload["reasoning_effort"], &upstreamReasoning); err != nil || upstreamReasoning != "medium" {
-		t.Fatalf("upstream reasoning_effort = %q, want medium", upstreamReasoning)
+	if err := json.Unmarshal(upstreamPayload["reasoning_effort"], &upstreamReasoning); err != nil || upstreamReasoning != "high" {
+		t.Fatalf("upstream reasoning_effort = %q, want the client value forwarded verbatim", upstreamReasoning)
 	}
 	if !recorded.ReasoningPresent {
 		t.Fatal("reasoning_present = false, want true")

@@ -34,33 +34,28 @@ func TestParseStillRequiresReasoningCapabilityWhenReasoningIsOn(t *testing.T) {
 	}
 }
 
-// mapReasoning deliberately forwards an active reasoning request to a model the
-// local catalog marks as non-reasoning (see
-// TestToChatPassesReasoningWithoutLocalCapabilityGate). An explicit off switch is
-// the one case that must not be forwarded: it now passes the capability gate, and
-// NIM answers 422 for chat parameters outside a model's schema, which would only
-// move the 501 rather than remove it.
-func TestToChatDropsReasoningAliasesWhenReasoningIsOffOnNonReasoningModel(t *testing.T) {
-	for _, body := range []string{
-		`{"model":"public-chat","input":"hi","reasoning_effort":"none"}`,
-		`{"model":"public-chat","input":"hi","reasoning":{"effort":"none"}}`,
-		`{"model":"public-chat","input":"hi","thinking":false}`,
+// Reasoning is pass-through: the mapped aliases are forwarded verbatim even to
+// a non-reasoning model. An upstream that does not declare the parameter will
+// answer for itself; the router no longer strips or rewrites the request.
+func TestToChatForwardsReasoningAliasesOnNonReasoningModel(t *testing.T) {
+	for _, testCase := range []struct{ body, alias, want string }{
+		{`{"model":"public-chat","input":"hi","reasoning_effort":"none"}`, "reasoning_effort", `"none"`},
+		{`{"model":"public-chat","input":"hi","reasoning":{"effort":"none"}}`, "reasoning_effort", `"none"`},
+		{`{"model":"public-chat","input":"hi","thinking":false}`, "thinking", `false`},
 	} {
-		encoded, err := ToChat([]byte(body), nonReasoningModel())
+		encoded, err := ToChat([]byte(testCase.body), nonReasoningModel())
 		if err != nil {
-			t.Fatalf("ToChat(%s): %v", body, err)
+			t.Fatalf("ToChat(%s): %v", testCase.body, err)
 		}
 		var chat map[string]json.RawMessage
 		if err := json.Unmarshal(encoded, &chat); err != nil {
 			t.Fatalf("decode body: %v; got=%s", err, encoded)
 		}
-		for _, name := range []string{"reasoning_effort", "reasoning", "thinking"} {
-			if _, present := chat[name]; present {
-				t.Errorf("ToChat(%s) forwarded %q to a non-reasoning model: %s", body, name, encoded)
-			}
+		if got := string(chat[testCase.alias]); got != testCase.want {
+			t.Errorf("ToChat(%s) forwarded %q as %s, want %s", testCase.body, testCase.alias, got, testCase.want)
 		}
 		if _, present := chat["messages"]; !present {
-			t.Errorf("ToChat(%s) lost the messages field: %s", body, encoded)
+			t.Errorf("ToChat(%s) lost the messages field: %s", testCase.body, encoded)
 		}
 	}
 }

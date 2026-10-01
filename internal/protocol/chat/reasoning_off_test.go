@@ -55,15 +55,14 @@ func TestParseStillRequiresReasoningCapabilityWhenReasoningIsOn(t *testing.T) {
 	}
 }
 
-// Letting reasoning-off requests through only helps if the now-meaningless alias
-// never reaches the wire: NIM validates the chat schema strictly and answers 422
-// for parameters the model does not declare, which would move the 501 to a 422
-// instead of removing it.
-func TestMarshalForDropsReasoningAliasesOnNonReasoningModel(t *testing.T) {
-	for _, testCase := range []struct{ body, alias string }{
-		{`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`, "reasoning_effort"},
-		{`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"thinking":false}`, "thinking"},
-		{`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`, "reasoning"},
+// Reasoning is pass-through: the aliases are forwarded verbatim even to a
+// non-reasoning model. An upstream that does not declare the parameter will
+// answer for itself; the router no longer strips or rewrites the request.
+func TestMarshalForForwardsReasoningAliasesOnNonReasoningModel(t *testing.T) {
+	for _, testCase := range []struct{ body, alias, want string }{
+		{`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`, "reasoning_effort", `"none"`},
+		{`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"thinking":false}`, "thinking", `false`},
+		{`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`, "reasoning", `{"effort":"none"}`},
 	} {
 		request, err := Parse([]byte(testCase.body))
 		if err != nil {
@@ -77,10 +76,8 @@ func TestMarshalForDropsReasoningAliasesOnNonReasoningModel(t *testing.T) {
 		if err := json.Unmarshal(encoded, &fields); err != nil {
 			t.Fatalf("decode body: %v; got=%s", err, encoded)
 		}
-		for _, name := range []string{"reasoning_effort", "reasoning", "thinking"} {
-			if _, present := fields[name]; present {
-				t.Errorf("MarshalFor(%s) forwarded %q to a non-reasoning model: %s", testCase.alias, name, encoded)
-			}
+		if got := string(fields[testCase.alias]); got != testCase.want {
+			t.Errorf("MarshalFor(%s) forwarded %q as %s, want %s", testCase.alias, testCase.alias, got, testCase.want)
 		}
 		if _, present := fields["messages"]; !present {
 			t.Errorf("MarshalFor(%s) lost the messages field: %s", testCase.alias, encoded)
@@ -88,8 +85,8 @@ func TestMarshalForDropsReasoningAliasesOnNonReasoningModel(t *testing.T) {
 	}
 }
 
-// A model that can reason must keep resolving the off switch through the normal
-// wire-format path rather than having it silently stripped.
+// An explicit off switch keeps its exact wire value on a reasoning model too —
+// no profile-driven normalisation happens anywhere on the request path.
 func TestMarshalForKeepsReasoningOffForReasoningModel(t *testing.T) {
 	request, err := Parse([]byte(`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`))
 	if err != nil {

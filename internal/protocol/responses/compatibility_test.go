@@ -59,11 +59,29 @@ func TestResponsesAcceptsNullUnsupportedToolExtensions(t *testing.T) {
 	}
 }
 
-func TestResponsesRejectsConflictingReasoningAliases(t *testing.T) {
-	mustFail(t, `{"model":"public-chat","input":"think","reasoning_effort":"low","reasoning":{"effort":"high"}}`, "invalid_parameter")
+// Reasoning aliases are pass-through: conflicting values are the upstream's
+// verdict, so Parse accepts them and the mapped chat body keeps both fields.
+func TestResponsesAcceptsConflictingReasoningAliases(t *testing.T) {
+	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning_effort":"low","reasoning":{"effort":"high"}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := string(fields["reasoning_effort"]); got != `"high"` {
+		t.Fatalf("reasoning_effort = %s, want the reasoning.effort mapping forwarded verbatim", got)
+	}
 }
 
-func TestResponsesClampsReasoningToModelProfile(t *testing.T) {
+// The Responses reasoning parameter maps to the chat field name only; its value
+// is never rewritten to match the model profile.
+func TestResponsesForwardsReasoningVerbatimRegardlessOfProfile(t *testing.T) {
 	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning":{"effort":"high"}}`))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -81,8 +99,11 @@ func TestResponsesClampsReasoningToModelProfile(t *testing.T) {
 	if err := json.Unmarshal(body, &fields); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if got := string(fields["thinking"]); got != `{"budget_tokens":8192,"type":"enabled"}` {
-		t.Fatalf("thinking = %s, want medium profile budget", got)
+	if got := string(fields["reasoning_effort"]); got != `"high"` {
+		t.Fatalf("reasoning_effort = %s, want the client value forwarded verbatim", got)
+	}
+	if _, ok := fields["thinking"]; ok {
+		t.Fatal("thinking was synthesized from the model profile")
 	}
 }
 

@@ -194,9 +194,9 @@ func validateRequirements(model Model, requirements Requirements) error {
 	if requirements.Vision && !model.SupportsVision {
 		return &UnsupportedCapabilityError{Capability: CapabilityVision}
 	}
-	if requirements.Reasoning && !model.SupportsReasoning {
-		return &UnsupportedCapabilityError{Capability: CapabilityReasoning}
-	}
+	// Reasoning is deliberately not gated: the reasoning aliases are forwarded
+	// verbatim, so the upstream — not the local profile — decides what it can
+	// act on. Requirements.Reasoning remains observability-only.
 	if requirements.Tools {
 		if !model.SupportsTools {
 			return &UnsupportedCapabilityError{Capability: CapabilityTools}

@@ -142,7 +142,15 @@ func TestResponsesPassesParsedCapabilityRequirementsToModelResolver(t *testing.T
 	}
 }
 
-func TestResponsesMarshalCapabilityErrorRecordsErrorCode(t *testing.T) {
+// Reasoning is pass-through: a request that names reasoning aliases resolves and
+// routes upstream even on a model the profile marks as non-reasoning or
+// off-profile, so the llama-shape profile no longer produces a local 400/501.
+func TestResponsesRoutesReasoningRequestWithoutProfileGate(t *testing.T) {
+	called := false
+	runner := attemptRunnerFunc(func(context.Context, int64, bool, router.ExecuteFunc) (router.AttemptResult, error) {
+		called = true
+		return router.AttemptResult{Response: &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":"resp_1","object":"response","status":"completed"}`))}}, nil
+	})
 	resolver := modelResolverFunc(func(_ context.Context, _ string, _ modelcatalog.Requirements) (modelcatalog.Model, error) {
 		return modelcatalog.Model{
 			ID: 3, PublicID: "public-chat", UpstreamID: "vendor/chat", Kind: modelcatalog.KindChat,
@@ -150,12 +158,7 @@ func TestResponsesMarshalCapabilityErrorRecordsErrorCode(t *testing.T) {
 			ReasoningLevels: []string{"none"}, ReasoningZeroAllowed: false,
 		}, nil
 	})
-	var recorded observability.RequestRecord
-	recorder := requestRecorderFunc(func(_ context.Context, record observability.RequestRecord) error {
-		recorded = record
-		return nil
-	})
-	handler := observability.HTTPMiddleware(recorder, clock.RealClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), NewResponses(resolver, nil, nil))
+	handler := NewResponses(resolver, runner, nil)
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
 		`{"model":"public-chat","input":"think","reasoning":{"effort":"high"}}`,
@@ -163,9 +166,8 @@ func TestResponsesMarshalCapabilityErrorRecordsErrorCode(t *testing.T) {
 
 	handler.ServeHTTP(response, request)
 
-	assertChatError(t, response, http.StatusBadRequest, "model_capability_unsupported")
-	if recorded.ErrorCode == nil || *recorded.ErrorCode != "model_capability_unsupported" {
-		t.Fatalf("recorded error code = %v, want model_capability_unsupported", recorded.ErrorCode)
+	if !called || response.Code != http.StatusOK {
+		t.Fatalf("provider path called=%v status=%d body=%s", called, response.Code, response.Body.String())
 	}
 }
 
@@ -632,8 +634,8 @@ func TestResponsesNonstreamRecordsReasoning(t *testing.T) {
 	if recorded.ReasoningRequestedLevel != "high" {
 		t.Fatalf("reasoning_requested_level = %q, want high", recorded.ReasoningRequestedLevel)
 	}
-	if recorded.ReasoningEffectiveLevel != "medium" {
-		t.Fatalf("reasoning_effective_level = %q, want medium", recorded.ReasoningEffectiveLevel)
+	if recorded.ReasoningEffectiveLevel != "high" {
+		t.Fatalf("reasoning_effective_level = %q, want high (pass-through)", recorded.ReasoningEffectiveLevel)
 	}
 	if recorded.ReasoningSource != "client" {
 		t.Fatalf("reasoning_source = %q, want client", recorded.ReasoningSource)
@@ -647,8 +649,8 @@ func TestResponsesNonstreamRecordsReasoning(t *testing.T) {
 		t.Fatalf("upstream model = %q, want vendor/chat", upstreamModel)
 	}
 	var upstreamReasoning string
-	if err := json.Unmarshal(upstreamPayload["reasoning_effort"], &upstreamReasoning); err != nil || upstreamReasoning != "medium" {
-		t.Fatalf("upstream reasoning_effort = %q, want medium", upstreamReasoning)
+	if err := json.Unmarshal(upstreamPayload["reasoning_effort"], &upstreamReasoning); err != nil || upstreamReasoning != "high" {
+		t.Fatalf("upstream reasoning_effort = %q, want the client value forwarded verbatim", upstreamReasoning)
 	}
 	if !recorded.ReasoningPresent {
 		t.Fatal("reasoning_present = false, want true")

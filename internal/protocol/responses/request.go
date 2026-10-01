@@ -2,7 +2,6 @@ package responses
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -98,10 +97,10 @@ func Parse(body []byte) (Request, error) {
 	}
 	reasoning, err := compat.ParseReasoning(fields)
 	if err != nil {
-		if errors.Is(err, compat.ErrAmbiguousReasoning) {
-			return Request{}, invalidResponses("invalid_parameter", "reasoning", "Reasoning aliases must describe the same level and budget.")
-		}
-		return Request{}, compatRequestError(err)
+		// Pass-through: mapReasoning forwards the aliases verbatim, so a
+		// malformed or conflicting pair is the upstream's verdict, not ours.
+		// The parse result feeds observability and the Requirements flag only.
+		reasoning = compat.ReasoningSpec{}
 	}
 	if err := mapMaxOutputTokens(fields, chat); err != nil {
 		return Request{}, err
@@ -161,10 +160,14 @@ func (r Request) ReasoningRequested() bool {
 }
 
 func (r Request) MarshalFor(model modelcatalog.Model) ([]byte, error) {
-	return r.MarshalForWithOptions(model, false)
+	return r.MarshalForWithOptions(model)
 }
 
-func (r Request) MarshalForWithOptions(model modelcatalog.Model, autoReasoning bool) ([]byte, error) {
+// MarshalForWithOptions renders the upstream chat payload. The Responses
+// reasoning parameter is mapped to its chat field name (mapReasoning) and
+// otherwise forwarded verbatim — the per-model reasoning profile is advisory
+// metadata, never a rewrite authority.
+func (r Request) MarshalForWithOptions(model modelcatalog.Model) ([]byte, error) {
 	if model.Kind != modelcatalog.KindChat || !model.Enabled {
 		return nil, invalidResponses("model_capability_unsupported", "model", "The selected model is not a chat model.")
 	}
@@ -188,31 +191,6 @@ func (r Request) MarshalForWithOptions(model modelcatalog.Model, autoReasoning b
 			return nil, fmt.Errorf("marshal normalized Responses tool choice: %w", err)
 		}
 		chat["tool_choice"] = encodedChoice
-	}
-	reasoning := r.reasoning
-	if autoReasoning && !reasoning.Requested && model.SupportsReasoning {
-		// mapMaxOutputTokens already renamed max_output_tokens to max_tokens in
-		// chatFields, so OutputTokenLimit sees the same allowance the budget cap
-		// will.
-		if automatic, ok := compat.AutoReasoningSpec(model.ReasoningProfile(), compat.OutputTokenLimit(chat)); ok {
-			reasoning = automatic
-		}
-	}
-	if reasoning.Requested && model.SupportsReasoning {
-		decision, err := compat.ResolveReasoning(reasoning, model.ReasoningProfile())
-		if err != nil {
-			return nil, reasoningResponseModelError(err)
-		}
-		if err := compat.ApplyReasoning(chat, decision, model.ReasoningProfile()); err != nil {
-			return nil, reasoningResponseModelError(err)
-		}
-	} else if r.reasoning.Requested && !r.reasoning.RequiresReasoning() {
-		// mapReasoning deliberately forwards a reasoning request to a model the local
-		// catalog marks as non-reasoning and lets the upstream decide. An explicit
-		// reasoning-off is different: Requirements no longer rejects it, and the
-		// aliases carry nothing this upstream can act on, so forwarding them only
-		// risks a 422 from NIM's strict chat schema.
-		compat.StripReasoning(chat)
 	}
 	encodedModel, _ := json.Marshal(model.UpstreamID)
 	chat["model"] = encodedModel

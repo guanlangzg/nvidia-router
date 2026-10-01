@@ -296,14 +296,21 @@ func TestMarshalForPreservesNativeThinking(t *testing.T) {
 }
 
 func TestMarshalForPreservesConflictingReasoningFields(t *testing.T) {
-	_, err := Parse([]byte(`{
+	request, err := Parse([]byte(`{
 		"model":"public-model",
 		"messages":[{"role":"user","content":"hello"}],
 		"reasoning_effort":"low",
 		"thinking":{"type":"enabled","budget_tokens":24576}
 	}`))
-	if err == nil {
-		t.Fatal("Parse unexpectedly accepted conflicting reasoning aliases")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"reasoning_effort":"low"`)) || !bytes.Contains(body, []byte(`"budget_tokens":24576`)) {
+		t.Fatalf("conflicting reasoning aliases were not forwarded verbatim: %s", body)
 	}
 }
 

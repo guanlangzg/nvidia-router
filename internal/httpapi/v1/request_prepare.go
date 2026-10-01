@@ -16,7 +16,7 @@ type modelRequest interface {
 	Requirements() modelcatalog.Requirements
 	RequestedReasoningLevel() string
 	ReasoningRequested() bool
-	MarshalForWithOptions(modelcatalog.Model, bool) ([]byte, error)
+	MarshalForWithOptions(modelcatalog.Model) ([]byte, error)
 }
 
 // preparedModelRequest contains the values shared by the Chat and Responses
@@ -31,7 +31,6 @@ type preparedModelRequest struct {
 	EffectiveReasoningLevel string
 	ReasoningRequested      bool
 	ReasoningWireFields     string
-	ReasoningSource         string
 }
 
 // prepareModelRequest performs the common model/stream observation, model
@@ -39,7 +38,7 @@ type preparedModelRequest struct {
 // metadata observation. It deliberately has no provider or response-writing
 // responsibilities: callers can only enter a provider branch after this
 // function succeeds.
-func prepareModelRequest(ctx context.Context, request modelRequest, resolver ModelResolver, autoReasoningEnabled bool) (preparedModelRequest, error) {
+func prepareModelRequest(ctx context.Context, request modelRequest, resolver ModelResolver) (preparedModelRequest, error) {
 	modelID := request.PublicModelID()
 	stream := request.Stream()
 	observability.SetModel(ctx, modelID, stream)
@@ -57,24 +56,19 @@ func prepareModelRequest(ctx context.Context, request modelRequest, resolver Mod
 		return preparedModelRequest{}, modelError(err)
 	}
 
-	autoReasoning := autoReasoningEnabled && model.SupportsReasoning
-	body, err := request.MarshalForWithOptions(model, autoReasoning)
+	body, err := request.MarshalForWithOptions(model)
 	if err != nil {
 		return preparedModelRequest{}, err
 	}
 
 	// Marshal succeeded, so it is now safe to publish effective wire metadata.
+	// Reasoning is pass-through, so the effective level is whatever the client
+	// asked for and the source is always the client when a request carried one.
 	effectiveReasoningLevel, reasoningRequested, wireFields := observability.ReasoningMetadataFromBody(body)
 	observability.SetReasoningLevels(ctx, requestedReasoningLevel, effectiveReasoningLevel)
 	observability.SetReasoningRequest(ctx, reasoningRequested, wireFields)
-	reasoningSource := ""
 	if request.ReasoningRequested() {
-		reasoningSource = "client"
-	} else if autoReasoning {
-		reasoningSource = "auto-inject"
-	}
-	if reasoningSource != "" {
-		observability.SetReasoningSource(ctx, reasoningSource)
+		observability.SetReasoningSource(ctx, "client")
 	}
 
 	return preparedModelRequest{
@@ -85,6 +79,5 @@ func prepareModelRequest(ctx context.Context, request modelRequest, resolver Mod
 		EffectiveReasoningLevel: effectiveReasoningLevel,
 		ReasoningRequested:      reasoningRequested,
 		ReasoningWireFields:     wireFields,
-		ReasoningSource:         reasoningSource,
 	}, nil
 }

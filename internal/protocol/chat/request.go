@@ -3,7 +3,6 @@ package chat
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -93,10 +92,10 @@ func Parse(payload []byte) (Request, error) {
 	}
 	reasoning, err := compat.ParseReasoning(fields)
 	if err != nil {
-		if errors.Is(err, compat.ErrAmbiguousReasoning) {
-			return Request{}, invalidRequest("invalid_parameter", "reasoning", "Reasoning aliases must describe the same level and budget.")
-		}
-		return Request{}, compatRequestError(err)
+		// Pass-through: the reasoning aliases are forwarded verbatim, so a
+		// malformed or conflicting pair is the upstream's verdict, not ours.
+		// The parse result feeds observability and the Requirements flag only.
+		reasoning = compat.ReasoningSpec{}
 	}
 	if err := validateTokenLimits(fields); err != nil {
 		return Request{}, err
@@ -152,18 +151,23 @@ func (r Request) ReasoningRequested() bool {
 }
 
 func (r Request) MarshalFor(model modelcatalog.Model) ([]byte, error) {
-	return r.MarshalForWithOptions(model, false)
+	return r.MarshalForWithOptions(model)
 }
 
-func (r Request) MarshalForWithOptions(model modelcatalog.Model, autoReasoning bool) ([]byte, error) {
+// MarshalForWithOptions renders the upstream payload. Reasoning aliases are
+// pass-through: whatever the client sent reaches the upstream untouched, so the
+// per-model reasoning profile is the operator's advisory metadata, never a
+// rewrite authority.
+func (r Request) MarshalForWithOptions(model modelcatalog.Model) ([]byte, error) {
 	if err := validateModel(r, model); err != nil {
 		return nil, err
 	}
-	// Fast path: 80% of requests have no tool/reasoning mutation and the
-	// upstream model equals the public model — reuse the original payload
-	// without clone+sort+marshal.
+	// Fast path: 80% of requests have no tool mutation and the upstream model
+	// equals the public model — reuse the original payload without
+	// clone+sort+marshal. Reasoning aliases need no rewrite, so they never
+	// block this path.
 	if model.UpstreamID == r.publicModel && len(r.tools) == 0 && !r.toolChoiceSet && !r.messagesNormalized &&
-		!r.reasoning.Requested && !autoReasoning && !r.rawUnsafe {
+		!r.rawUnsafe {
 		if _, hasComp := r.fields["max_completion_tokens"]; !hasComp || isJSONNull(r.fields["max_completion_tokens"]) {
 			if _, hasTokens := r.fields["max_tokens"]; hasTokens && isJSONNull(r.fields["max_tokens"]) {
 				// max_tokens is null — still needs normalization, fall through
@@ -193,28 +197,6 @@ func (r Request) MarshalForWithOptions(model modelcatalog.Model, autoReasoning b
 			return nil, fmt.Errorf("marshal normalized chat tool choice: %w", err)
 		}
 		fields["tool_choice"] = encodedChoice
-	}
-	reasoning := r.reasoning
-	if autoReasoning && !reasoning.Requested && model.SupportsReasoning {
-		if automatic, ok := compat.AutoReasoningSpec(model.ReasoningProfile(), compat.OutputTokenLimit(fields)); ok {
-			reasoning = automatic
-		}
-	}
-	if reasoning.Requested && model.SupportsReasoning {
-		decision, err := compat.ResolveReasoning(reasoning, model.ReasoningProfile())
-		if err != nil {
-			return nil, reasoningModelError(err)
-		}
-		if err := compat.ApplyReasoning(fields, decision, model.ReasoningProfile()); err != nil {
-			return nil, reasoningModelError(err)
-		}
-	} else if r.reasoning.Requested && !r.reasoning.RequiresReasoning() {
-		// An explicit reasoning-off on a model that cannot reason is already
-		// satisfied (see Requirements above), so the aliases carry no instruction
-		// this upstream could act on — and NIM validates the chat schema strictly
-		// enough to answer 422 for parameters outside it. Drop them instead of
-		// forwarding them.
-		compat.StripReasoning(fields)
 	}
 
 	// Normalize max_completion_tokens to max_tokens for upstreams (like NVIDIA NIM)

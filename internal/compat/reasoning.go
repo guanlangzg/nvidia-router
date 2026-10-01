@@ -3,9 +3,7 @@ package compat
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
-	"sort"
 	"strings"
 )
 
@@ -23,7 +21,12 @@ const (
 )
 
 var ErrAmbiguousReasoning = errors.New("reasoning aliases disagree")
-var ErrReasoningUnsupported = errors.New("reasoning is not supported by the selected model")
+
+// Reasoning handling is pass-through: whatever alias the client sent reaches
+// the upstream untouched. ParseReasoning exists purely so the request log can
+// record what the caller asked for and so the Requirements flag can carry the
+// on/off intent; a parse failure never rejects a request and the per-model
+// profile below is advisory metadata, never a rewrite authority.
 
 var reasoningBudgets = map[ReasoningLevel]int{
 	ReasoningNone:    0,
@@ -60,26 +63,9 @@ type ReasoningSpec struct {
 // reasoning tokens. Requested alone does not mean that: reasoning_effort:"none",
 // thinking:false and thinking:{"type":"disabled"} all parse as Requested because
 // the caller did name the parameter, yet they ask for reasoning to stay off —
-// something a model without the capability already satisfies. Treating them as a
-// capability requirement made every non-reasoning model answer 501
-// not_implemented to clients that send a reasoning parameter as a global default.
+// something a model without the capability already satisfies.
 func (s ReasoningSpec) RequiresReasoning() bool {
 	return s.Requested && s.Level != ReasoningNone
-}
-
-// reasoningAliasFields are the mutually redundant request fields that can carry a
-// reasoning instruction. Any rewrite has to clear all three, otherwise a stale
-// alias contradicts the form actually written.
-var reasoningAliasFields = [3]string{"reasoning_effort", "reasoning", "thinking"}
-
-// StripReasoning removes every reasoning alias from a request payload. It is for
-// upstreams that cannot reason at all: the fields carry no instruction they could
-// act on, and NIM validates the chat schema strictly enough to answer 422 for
-// parameters outside it.
-func StripReasoning(fields map[string]json.RawMessage) {
-	for _, name := range reasoningAliasFields {
-		delete(fields, name)
-	}
 }
 
 type ReasoningProfile struct {
@@ -91,24 +77,9 @@ type ReasoningProfile struct {
 	DynamicAllowed bool
 	WireFormat     string
 	// AdvisoryLevels marks upstreams that accept an effort string but do not act
-	// on its magnitude. Every enabled level then means the same thing, so the
-	// wire value is normalised to one standard level and only on/off is honest.
+	// on its magnitude. Advisory metadata only: nothing on the request path
+	// normalises levels anymore.
 	AdvisoryLevels bool
-}
-
-// advisoryOnLevel is the single standard effort sent to advisory upstreams when
-// reasoning is on. It must stay a value the OpenAI-compatible surface accepts —
-// "auto" is not one, so it cannot be used here.
-const advisoryOnLevel = ReasoningHigh
-
-type ReasoningDecision struct {
-	Requested       bool
-	Source          string
-	RequestedLevel  ReasoningLevel
-	RequestedBudget int
-	EffectiveLevel  ReasoningLevel
-	EffectiveBudget int
-	Downgraded      bool
 }
 
 func ParseReasoning(fields map[string]json.RawMessage) (ReasoningSpec, error) {
@@ -148,251 +119,6 @@ func ParseReasoning(fields map[string]json.RawMessage) (ReasoningSpec, error) {
 		}
 	}
 	return result, nil
-}
-
-// Auto-injection thresholds on the client's completion allowance. At or below
-// the off ceiling, reasoning must not fire at all: upstreams spend every token
-// thinking and return an empty answer with finish_reason=length. Between the
-// ceilings only the cheapest positive level fits. The content reserve in
-// capThinkingBudget starts binding below 128 tokens, which is why the off rung
-// ends there.
-const (
-	autoReasoningOffCeiling   = 128
-	autoReasoningSmallCeiling = 511
-)
-
-func AutoReasoningSpec(profile ReasoningProfile, outputLimit int) (ReasoningSpec, bool) {
-	if !profile.Supported {
-		return ReasoningSpec{}, false
-	}
-	levels := availableLevels(profile)
-	if outputLimit > 0 && outputLimit <= autoReasoningOffCeiling {
-		// A tiny completion window cannot survive any reasoning. Say "off" when
-		// this profile can express it; otherwise stay silent — injecting a
-		// positive level here guarantees starvation, and silence never produces
-		// the ErrReasoningUnsupported path (no spec is constructed).
-		for _, level := range levels {
-			if level == ReasoningNone {
-				return ReasoningSpec{Requested: true, Level: ReasoningNone, Budget: 0, Source: "auto-inject"}, true
-			}
-		}
-		return ReasoningSpec{}, false
-	}
-	if outputLimit > 0 && outputLimit <= autoReasoningSmallCeiling {
-		for _, level := range levels {
-			if level == ReasoningNone || level == ReasoningAuto {
-				continue
-			}
-			return ReasoningSpec{Requested: true, Level: level, Budget: budgetForLevel(level), Source: "auto-inject"}, true
-		}
-		return ReasoningSpec{}, false
-	}
-	// A silent default must be moderate. Auto-injection fires on requests that
-	// never mentioned reasoning, so picking the heaviest level gave every such
-	// request the slowest path — and for upstreams whose accepted vocabulary
-	// stops below the top (e.g. no_think/low/high) it produced an effort value
-	// the upstream rejects outright. Choose the strongest level no heavier than
-	// "medium"; only when every level is heavier, fall back to the cheapest.
-	// "none" carries no instruction and "auto" is not a wire-safe OpenAI effort,
-	// so neither is ever injected.
-	ceiling := budgetForLevel(ReasoningMedium)
-	best := ReasoningLevel("")
-	for _, level := range levels {
-		if level == ReasoningNone || level == ReasoningAuto {
-			continue
-		}
-		if budgetForLevel(level) <= ceiling {
-			best = level
-		}
-	}
-	if best == "" {
-		for _, level := range levels {
-			if level != ReasoningNone && level != ReasoningAuto {
-				best = level
-				break
-			}
-		}
-	}
-	if best == "" {
-		return ReasoningSpec{}, false
-	}
-	return ReasoningSpec{
-		Requested: true,
-		Level:     best,
-		Budget:    budgetForLevel(best),
-		Source:    "auto-inject",
-	}, true
-}
-
-func ResolveReasoning(spec ReasoningSpec, profile ReasoningProfile) (ReasoningDecision, error) {
-	if !spec.Requested {
-		return ReasoningDecision{}, nil
-	}
-	if !profile.Supported {
-		return ReasoningDecision{}, ErrReasoningUnsupported
-	}
-	levels := availableLevels(profile)
-	if len(levels) == 0 {
-		return ReasoningDecision{}, ErrReasoningUnsupported
-	}
-	requestedLevel := spec.Level
-	if requestedLevel == "" {
-		requestedLevel = levelForBudget(spec.Budget)
-	}
-	requestedBudget := spec.Budget
-	if !spec.HasBudget {
-		requestedBudget = budgetForLevel(requestedLevel)
-	}
-	if _, known := reasoningBudgets[requestedLevel]; !known && profile.DynamicAllowed {
-		return ReasoningDecision{
-			Requested: true, Source: spec.Source, RequestedLevel: requestedLevel, RequestedBudget: requestedBudget,
-			EffectiveLevel: requestedLevel, EffectiveBudget: -1,
-		}, nil
-	}
-	if _, known := reasoningBudgets[requestedLevel]; !known && !profile.DynamicAllowed {
-		// Unknown level and dynamic budgets disallowed: the user likely misspelled
-		// a standard level (e.g., "hgih" for "high"). Without this block, nearestLevel
-		// returns "none" (budgetForLevel returns 0 for unknown levels, and 0 is nearest
-		// to "none"), silently turning off thinking when the user intended to enable it.
-		// Return invalid_parameter with the model's accepted levels.
-		accepted := make([]string, len(levels))
-		for i, level := range levels {
-			accepted[i] = string(level)
-		}
-		return ReasoningDecision{}, invalid("invalid_parameter", spec.Source, fmt.Sprintf(
-			"The reasoning level %q is not recognized. This model accepts: %s.",
-			requestedLevel, strings.Join(accepted, ", "),
-		))
-	}
-	effectiveLevel := nearestLevel(requestedLevel, requestedBudget, levels, profile)
-	if effectiveLevel == "" {
-		return ReasoningDecision{}, ErrReasoningUnsupported
-	}
-	effectiveBudget := budgetForLevel(effectiveLevel)
-	if effectiveLevel == ReasoningAuto && profile.DynamicAllowed {
-		effectiveBudget = -1
-	} else if spec.HasBudget && profile.DynamicAllowed && effectiveLevel != ReasoningNone {
-		effectiveBudget = clampBudget(spec.Budget, profile)
-	}
-	if effectiveLevel == ReasoningNone {
-		effectiveBudget = 0
-	}
-	return ReasoningDecision{
-		Requested: true, Source: spec.Source, RequestedLevel: requestedLevel, RequestedBudget: requestedBudget,
-		EffectiveLevel: effectiveLevel, EffectiveBudget: effectiveBudget,
-		Downgraded: requestedLevel != effectiveLevel || (spec.HasBudget && requestedBudget != effectiveBudget),
-	}, nil
-}
-
-func ApplyReasoning(fields map[string]json.RawMessage, decision ReasoningDecision, profile ReasoningProfile) error {
-	if !decision.Requested {
-		return nil
-	}
-	wireFormat := strings.ToLower(profile.WireFormat)
-	preserveNativeThinking := decision.Source == "thinking" && (wireFormat == "" || wireFormat == "openai" || wireFormat == "thinking")
-	// The thinking budget is billed against the same completion allowance as the
-	// answer, so an unreconciled budget starves the content: upstreams happily
-	// spend every token on reasoning and return an empty message with
-	// finish_reason=length. Cap it before it reaches the wire.
-	budget := capThinkingBudget(decision.EffectiveBudget, OutputTokenLimit(fields))
-	StripReasoning(fields)
-	if preserveNativeThinking {
-		encoded, err := marshalThinking(decision, budget)
-		if err != nil {
-			return fmt.Errorf("marshal native thinking: %w", err)
-		}
-		fields["thinking"] = encoded
-		return nil
-	}
-	switch wireFormat {
-	case "", "openai":
-		level := decision.EffectiveLevel
-		if profile.AdvisoryLevels && level != ReasoningNone {
-			level = advisoryOnLevel
-		}
-		encoded, err := json.Marshal(string(level))
-		if err != nil {
-			return fmt.Errorf("marshal reasoning effort: %w", err)
-		}
-		fields["reasoning_effort"] = encoded
-	case "thinking":
-		encoded, err := marshalThinking(decision, budget)
-		if err != nil {
-			return fmt.Errorf("marshal thinking: %w", err)
-		}
-		fields["thinking"] = encoded
-	case "none":
-		return fmt.Errorf("%w: the selected model has no reasoning wire format", ErrReasoningUnsupported)
-	default:
-		return fmt.Errorf("unsupported reasoning wire format %q", profile.WireFormat)
-	}
-	return nil
-}
-
-// thinkingBudgetNumerator/Denominator bound the share of the completion
-// allowance reasoning may consume, leaving the remainder for the answer.
-const (
-	thinkingBudgetNumerator   = 3
-	thinkingBudgetDenominator = 4
-)
-
-// OutputTokenLimit reports the completion allowance the client asked for, or 0
-// when it left the limit to the upstream default. Exported because the protocol
-// packages must evaluate the auto-reasoning ladder against the same number the
-// budget cap later uses.
-func OutputTokenLimit(fields map[string]json.RawMessage) int {
-	for _, name := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
-		raw, ok := fields[name]
-		if !ok {
-			continue
-		}
-		var value *int
-		if json.Unmarshal(raw, &value) != nil || value == nil || *value <= 0 {
-			continue
-		}
-		return *value
-	}
-	return 0
-}
-
-// capThinkingBudget keeps the reasoning budget inside the completion allowance.
-// A negative budget means "let the upstream decide" and stays untouched, as does
-// every budget when the client set no limit of its own.
-// thinkingContentReserve keeps an absolute slice of the completion allowance
-// for the visible answer. The percentage cap alone still hands most of a tiny
-// window to reasoning (75% of 64 is 48), where even a one-line reply needs more
-// than the remaining 16 tokens. Below the crossover where reserve < 75% (limit
-// < 128) the absolute reserve binds instead. A limit at or below the reserve
-// itself leaves the budget uncapped: clamping to zero would emit
-// budget_tokens:0, which several upstreams reject, and converting enabled to
-// disabled is the injection ladder's decision, not the cap's.
-const thinkingContentReserve = 32
-
-func capThinkingBudget(budget, limit int) int {
-	if budget <= 0 || limit <= 0 {
-		return budget
-	}
-	allowed := limit * thinkingBudgetNumerator / thinkingBudgetDenominator
-	if reserved := limit - thinkingContentReserve; reserved > 0 && reserved < allowed {
-		allowed = reserved
-	}
-	if allowed <= 0 || budget <= allowed {
-		return budget
-	}
-	return allowed
-}
-
-func marshalThinking(decision ReasoningDecision, budget int) ([]byte, error) {
-	thinking := map[string]any{}
-	if decision.EffectiveLevel == ReasoningNone {
-		thinking["type"] = "disabled"
-	} else {
-		thinking["type"] = "enabled"
-		if budget >= 0 {
-			thinking["budget_tokens"] = budget
-		}
-	}
-	return json.Marshal(thinking)
 }
 
 func parseReasoningEffort(raw json.RawMessage, source string) (ReasoningSpec, error) {
@@ -527,12 +253,9 @@ func parseFlexibleLevel(value, param string) (ReasoningLevel, error) {
 // order, dropping "none" when the profile forbids it. Exported so the catalog
 // can validate at startup that a reasoning model can express at least one
 // level (the llama shape — levels=[none] with zero_allowed=false — yields an
-// empty slice and made every effort request fail 501).
+// empty slice and is worth an operator warning even though the request path
+// no longer consults the profile).
 func AvailableLevels(profile ReasoningProfile) []ReasoningLevel {
-	return availableLevels(profile)
-}
-
-func availableLevels(profile ReasoningProfile) []ReasoningLevel {
 	levels := append([]ReasoningLevel(nil), profile.Levels...)
 	if len(levels) == 0 {
 		levels = []ReasoningLevel{ReasoningNone, ReasoningAuto, ReasoningMinimal, ReasoningLow, ReasoningMedium, ReasoningHigh, ReasoningXHigh, ReasoningMax}
@@ -549,71 +272,7 @@ func availableLevels(profile ReasoningProfile) []ReasoningLevel {
 		seen[level] = struct{}{}
 		result = append(result, level)
 	}
-	sort.SliceStable(result, func(i, j int) bool { return budgetOrder(result[i]) < budgetOrder(result[j]) })
 	return result
-}
-
-func nearestLevel(requested ReasoningLevel, requestedBudget int, levels []ReasoningLevel, profile ReasoningProfile) ReasoningLevel {
-	if requested == ReasoningNone && profile.ZeroAllowed {
-		for _, level := range levels {
-			if level == ReasoningNone {
-				return level
-			}
-		}
-	}
-	// Auto is a dynamic sentinel, not a fixed budget. When the caller
-	// explicitly asked for auto, return it directly if the profile offers
-	// it; mapping it to none via budget distance (-1 vs 0) was a
-	// regression that collapsed auto -> none under nearest-neighbor.
-	if requested == ReasoningAuto {
-		for _, level := range levels {
-			if level == ReasoningAuto {
-				return ReasoningAuto
-			}
-		}
-	}
-	best := ReasoningLevel("")
-	bestDistance := int64(math.MaxInt64)
-	for _, level := range levels {
-		budget := budgetForLevel(level)
-		if level == ReasoningAuto {
-			budget = requestedBudget
-			if budget < 0 {
-				budget = 0
-			}
-		}
-		if profile.MaxBudget > 0 && budget > profile.MaxBudget {
-			continue
-		}
-		if profile.MinBudget > 0 && level != ReasoningNone && level != ReasoningAuto && budget < profile.MinBudget {
-			continue
-		}
-		distance := int64(absInt(budget - requestedBudget))
-		tieBreak := level == requested && best != requested
-		if !tieBreak && best == ReasoningAuto && level != ReasoningAuto {
-			tieBreak = true
-		}
-		if !tieBreak && level != ReasoningAuto && best != ReasoningAuto {
-			tieBreak = budget < budgetForLevel(best)
-		}
-		if distance < bestDistance || distance == bestDistance && tieBreak {
-			best, bestDistance = level, distance
-		}
-	}
-	return best
-}
-
-func clampBudget(value int, profile ReasoningProfile) int {
-	if value < 0 {
-		return -1
-	}
-	if profile.MinBudget > 0 && value < profile.MinBudget {
-		value = profile.MinBudget
-	}
-	if profile.MaxBudget > 0 && value > profile.MaxBudget {
-		value = profile.MaxBudget
-	}
-	return value
 }
 
 func levelForBudget(value int) ReasoningLevel {
@@ -636,14 +295,6 @@ func levelForBudget(value int) ReasoningLevel {
 
 func budgetForLevel(level ReasoningLevel) int {
 	return reasoningBudgets[level]
-}
-
-func budgetOrder(level ReasoningLevel) int {
-	budget := budgetForLevel(level)
-	if level == ReasoningAuto {
-		return 1
-	}
-	return budget + 1
 }
 
 func absInt(value int) int {

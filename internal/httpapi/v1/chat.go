@@ -64,10 +64,6 @@ func (h *Chat) WithRuntimeConfig(settings runtimeconfig.Provider) *Chat {
 	return h
 }
 
-func (h *Chat) autoReasoningEnabled() bool {
-	return h.settings != nil && h.settings.Snapshot().AutoReasoningEnabled
-}
-
 func (h *Chat) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		writeChatError(writer, &apierror.Error{
@@ -89,7 +85,7 @@ func (h *Chat) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writeChatError(writer, err)
 		return
 	}
-	prepared, err := prepareModelRequest(request.Context(), parsed, h.models, h.autoReasoningEnabled())
+	prepared, err := prepareModelRequest(request.Context(), parsed, h.models)
 	if err != nil {
 		writeChatError(writer, err)
 		return

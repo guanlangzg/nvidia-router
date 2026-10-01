@@ -33,13 +33,6 @@ func compatRequestError(err error) error {
 	return invalidResponses("invalid_parameter", "", err.Error())
 }
 
-func reasoningResponseModelError(err error) error {
-	if errors.Is(err, compat.ErrReasoningUnsupported) {
-		return invalidResponses("model_capability_unsupported", "reasoning", "The selected model does not support the requested reasoning mode.")
-	}
-	return compatRequestError(err)
-}
-
 type topLevelCheck struct {
 	reject func(map[string]json.RawMessage) error
 }

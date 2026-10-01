@@ -50,14 +50,3 @@ func compatRequestError(err error) error {
 	}
 	return invalidRequest("invalid_parameter", "", err.Error())
 }
-
-func reasoningModelError(err error) error {
-	if errors.Is(err, compat.ErrReasoningUnsupported) {
-		param := "reasoning"
-		return &apierror.Error{
-			Status: 501, Type: "invalid_request_error", Code: "model_capability_unsupported",
-			Message: "The selected model does not support the requested reasoning mode.", Param: &param, Cause: err,
-		}
-	}
-	return compatRequestError(err)
-}

@@ -456,3 +456,12 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
 - 部署方式：scp 覆盖远端 `src/` 两文件 → `docker compose -f docker-compose.yml -f docker-compose.proxy.yml build && up -d`（镜像重建、容器 healthy）。本地 mock fetch 冒烟 6 用例全过（归档于远端 `scripts/test/fingerprint-smoke.mjs`；容器镜像不含 scripts/，须在仓库 checkout 上跑）。
 - 线上真实验证（部署后）：**8/11 free 模型恢复**——longcat 非流式+流式、nemotron-3-ultra、mimo-v2.5、nemotron-3.5-lightning、mimo-v2.6、space-bunny（回归）、longcat+调用者工具全部 200；剩余 3 个为独立模型级问题：ling-3.0 上游 `Endpoint is unavailable`(400)、deepseek-v4-flash-free 已下线(400)、muse-spark CN 出口 RegionError(403)。路由器→网关全链路（候选测试端点）longcat/nemotron success；mimo-v2.5 在路由器 16-token 探测下仍报"上游多次未返回可用响应"（探测窗口对慢响应模型的已知语义限制，网关直连 200）。回滚：恢复 `src.bak-pre-fingerprint-20261001` 后重建镜像即可。
 - 遗留风险：上游可能轮换指纹特征（届时 403 回归，改 `opencodeUserAgent`/`FINGERPRINT_TOOL_NAMES` 即可）；#4182 takedown 风险未解除；ling-3.0/deepseek-v4-flash-free/muse-spark 为上游侧问题，无法本地修复。
+
+## 40. 2026-10-01 OCF 探测预算修复发布与端到端验证（fdbe7bf）
+
+- 提交 `fdbe7bf`（`fix: give OpenCodeFree base probes a template-token-proof budget`，分支 `codex/optimize-executor-20260828`）：OCF 基础探测与 detailed base 探测的 max_tokens 由 `modelProbeMaxTokens`(16) 改为新增 `ocfProbeMaxTokens`(256)；NVIDIA 探测保持 16。根因：mimo-v2.5-free 在 16-token 窗口下输出被不可见 chat 模板 token 吃光，200 + 空 content 被判"上游多次未返回可用响应"（可用模型误杀）；nemotron 对照组 16 tokens 可吐可见文本所以通过。门禁：go vet、`go test ./...` 全过。
+- 标准发布版本 `20261001-ocf-probe-budget-fdbe7bf`，Release `/opt/nvidia-router-releases/20261001-ocf-probe-budget-fdbe7bf`，镜像 `nvidia-router:deploy-20261001-ocf-probe-budget-fdbe7bf`；回滚点 `20261001-candidate-probe-fix-af5b566`。切换前备份 `backups/predeploy-20261001-ocf-probe-budget-fdbe7bf/router.db`（19,349,504 字节，600，10001:10001）。
+- 部署后候选测试 3/3 success（mimo 3.5s / longcat 3.6s / nemotron 14s）。启动日志有既有 WARN：`reasoning models with unexpressible profiles count=1 public_ids=opencodefree/space-bunny-free`（profile 一致性检查告警，非本次回归）。
+- 白名单现状（运营在本轮会话间自行整理过）：共 3 条启用——NVIDIA `nvidia/nemotron-3-ultra-550b-a55b`、OCF `opencodefree/longcat-2.5-preview-free`、OCF `opencodefree/space-bunny-free`；旧的 deepseek-v4-flash-free/jev/ling 白名单行已被删除。mimo-v2.5-free、nemotron-3-ultra-free 未登记（候选已验证可用，登记与否待运营决定）。
+- 端到端真实验证（临时 Access Key，测试后已删除）：`/v1/models` 200 返回 3 模型；`opencodefree/longcat-2.5-preview-free` 非流式 200/4.5s、流式 200/24 chunks 带 [DONE]；`opencodefree/space-bunny-free` 非流式 200/1.3s。**调用 OCF 模型必须用带 provider 前缀的公开 id（`opencodefree/<model>`），裸模型名 404 model_not_found**。
+- 回滚：恢复 `/opt/opencode-free-proxy/src.bak-pre-fingerprint-20261001`（网关）+ 镜像 `deploy-20261001-candidate-probe-fix-af5b566`（路由器）。
