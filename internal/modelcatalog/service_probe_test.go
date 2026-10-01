@@ -254,9 +254,11 @@ func TestCandidateDispatchesOpenCodeFreeWithoutNVIDIAKeys(t *testing.T) {
 	}
 	// A one-token budget made free-tier models answer 200 with empty content,
 	// which payload validation rightly rejects — working models were condemned
-	// as unreachable. The base probe must match the NVIDIA budget.
-	if probe.MaxTokens != modelProbeMaxTokens {
-		t.Fatalf("probe max_tokens = %d, want %d", probe.MaxTokens, modelProbeMaxTokens)
+	// as unreachable. 16 tokens stayed too small: gateway chat-template tokens
+	// are invisible but still billed, so the OCF base probe carries its own
+	// larger window instead of matching the NVIDIA budget.
+	if probe.MaxTokens != ocfProbeMaxTokens {
+		t.Fatalf("probe max_tokens = %d, want %d", probe.MaxTokens, ocfProbeMaxTokens)
 	}
 	assertCandidateNotPersisted(t, db, "mimo-v2.5-free")
 }

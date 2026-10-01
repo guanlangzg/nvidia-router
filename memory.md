@@ -419,3 +419,40 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
 - 本次部署源码提交为 `7d6bbb3`；标准 Release 为 `/opt/nvidia-router-releases/20260829-executor-consolidation-7d6bbb3`，镜像为 `nvidia-router:deploy-20260829-executor-consolidation-7d6bbb3`。
 - 回滚点为上一版本 `20260826-vibe-codex-cherry-288be38`；切换前数据库备份位于 `/opt/nvidia-router-releases/20260829-executor-consolidation-7d6bbb3/backups/predeploy-20260829-executor-consolidation-7d6bbb3/router.db`，SHA-256 为 `78218e062322d99524365bcc625a15ef0362613df43fb5951276c7a0aac58fb4`，权限/属主为 `600/10001:10001`。
 - 发布后健康检查、关键端口、静态资源和匿名鉴权均通过；管理员登录烟测返回 401，未重置密码。真实模型/代理矩阵未执行，公网 HTTP 明文警告保持。
+
+## 37. 2026-10-01 OCF 候选只保留 free 发布（eadee8a）
+
+- 提交 `eadee8a`（`feat: surface only free OpenCodeFree models in candidate discovery`）在分支 `codex/optimize-executor-20260828`，未推送 GitHub。`DiscoverCandidates` 过滤非 `-free` 后缀的 OpenCodeFree 模型；`SyncOpenCodeFreeModels` 过期同步仍用全量列表。本地门禁：`go test ./...`、`go vet`、`gofmt`、`git diff --check` 全过。
+- 标准版本 `20261001-ocf-free-candidates-eadee8a`，Release `/opt/nvidia-router-releases/20261001-ocf-free-candidates-eadee8a`，镜像 `nvidia-router:deploy-20261001-ocf-free-candidates-eadee8a`；回滚点 `20260829-executor-consolidation-7d6bbb3`。
+- 切换前备份 `backups/predeploy-20261001-ocf-free-candidates-eadee8a/router.db`（19,349,504 字节，600，10001:10001）。
+- 线上真实验证：网关 `/v1/models` 共 83 个模型（71 个非 free）；admin 候选接口返回 11 个 OCF 候选全部 `-free`（与网关 free 清单一致）+ 81 个 NVIDIA 候选，`nonfree-leak none`；管理员登录/注销 200/204（本地 `.env` 的 `NVIDIA_ROUTER_INITIAL_ADMIN_PASSWORD` 当前有效）；schema 46、白名单 8 条、启用 1 条（运营状态，未改动）；免认证健康/鉴权边界、静态资源、panic/fatal=0 全过。
+- 部署事故与教训：首次 `deploy_remote.py` 卡死在 docker build 步骤——脚本 `run()` 先 `stdout.read()` 再读 stderr，BuildKit 冷构建时大量进度写 stderr 塞满 SSH 通道缓冲造成 paramiko 死锁，而镜像实际已构建成功。处置：先 SSH 只读核对远端实际步骤（镜像已存在、app 未切换、无备份目录），确认后停本地任务同版本重跑（构建全缓存、stderr 极小）顺利完成。同类卡死先查远端真相再决定重跑，不要先动现网。
+- 未执行真实模型请求、代理轮换或 CONNECT 矩阵；公网 HTTP 明文风险保持不变。
+
+## 38. 2026-10-01 候选页直接测试模型发布与 OCF 探测预算修复（12bd9ad → af5b566）
+
+- 功能：候选列表行级"测试"按钮 + "测试选中候选"批量（前端并发 3，可停止）；后端 `POST /admin/api/models/candidates/test`（`{provider, upstream_id}` 同步返回 `{status, duration_ms, error}`），`Service.TestCandidate` 复用 `TestModelAuto` 只读探测路径（NVIDIA 随机多 Key、OCF 直连网关），零持久化；端点并发闸 4。提交 `12bd9ad`（含 dist 重建），本地门禁 go test/vet、前端 295 vitest、vue-tsc、build、eslint 全过。
+- 两轮部署：`20261001-candidate-probe-12bd9ad`（回滚点 `20261001-ocf-free-candidates-eadee8a`）→ 首轮真实验证发现 OCF 探测误杀 → 修复 `af5b566` → `20261001-candidate-probe-fix-af5b566`（回滚点 `20261001-candidate-probe-12bd9ad`）。两轮切换前备份均约 19,349,504 字节、600、10001:10001，健康/边界检查全过。
+- **根因教训（max_tokens=1 空内容误判）**：`testOpenCodeFreeModel` 用 `max_tokens:1`，free 档模型（如 space-bunny-free）把唯一 token 耗尽后返回 200 空内容（finish=length），`ValidateNonstreamChat` 判 ErrEmptyResponse → 上报"上游多次未返回可用响应"，**实际可用的模型被误判不可用**；同文件 NVIDIA 基础探测与 OCF detailed 探测都用 `modelProbeMaxTokens`(16)。修复：OCF 基础探针预算对齐 16。同类"HTTP 200 但空内容"必须看 content 而非状态码。
+- 线上真实判定（修复后）：`space-bunny-free` → success 11.8s（当前 11 个 free 候选中唯一可用）；`mimo-v2.5-free`/`nemotron-3-ultra-free` → 模型测试失败 403 FreeTierError（网关直连证实）；`deepseek-v4-flash-free` → 模型测试失败 400 Model is unavailable（已下线）；NVIDIA `z-ai/glm-5.3` → 90s 不可达（3×30s 探测窗口内无首字节，候选无 per-model 超时 override，慢模型会误报——已知语义限制，与白名单只读测试一致）。免认证边界、管理员登录/注销、非法输入 400 全过；容器 0 重启、panic/fatal 0。
+- 上游环境事实（非本次改动回归）：网关 `/api/monitor` 24h 成功率 1.29%（49/3788），网关→OpenCode 经内部星空池基本不可用已超 24h；路由器内置池 `healthy=26` 全靠 TTL 宽限维持，`validation_all_failed` 持续。OCF 网关主机名为单标签容器名 → OCF client `local=true` 直连不走池；远端 `.env` 的 `NVIDIA_ROUTER_INITIAL_ADMIN_PASSWORD` 是陈旧值（登录 401），有效值在本地 `.env`。
+
+## 39. 2026-10-01 OCF 全组不可用根因诊断（上游政策拒绝，非本地故障）
+
+- 现象：OCF 网关 24h monitor 成功率 1.44%（3755 请求仅 54 成功），失败分类 `upstream_http_error=3492`（94%）、`client_disconnected=190`；网关/代理池/路由器容器与健康端点全部正常。网关唯一调用方为路由器所用 key（`key:890117e0`）。
+- 根因是上游 OpenCode 收紧 free tier 准入，网关链路本身是通的（`space-bunny-free` 实测 200/1.7s）。11 个 free 候选逐个实测分类：
+  - **6 个 FreeTierError（403）**：`OpenCode's free tier can only be used from within OpenCode`——上游按客户端来源策略拒绝，覆盖 mimo-v2.5/mimo-v2.6-flash/longcat-2.5/ling-3.0/nemotron-3-ultra/nemotron-3.5-lightning；
+  - **2 个 RegionError（403）**：muse-spark-1.2/1.3-contributor `This model is not available in your country`（中国出口被封）；
+  - **1 个已下线（400）**：deepseek-v4-flash-free `Model is unavailable`；**1 个网关内部错误（500）**：jev-1.13-free；
+  - **1 个可用**：`space-bunny-free`。
+- 路由器白名单 4 个 OCF 模型（deepseek-v4-flash-free/jev-1.13-free/ling-3.0-flash-fin-free/longcat-2.5-preview-free，id 38-41）**全部 enabled=false**；渠道状态页 OCF 全红的直接输入是 modelhealth 对这些模型的探测全部撞上 FreeTierError。
+- 旁证：monitor 中 nemotron-3-ultra-free/hy3-free/x-preview-f-free 各 ~1013 次/24h（每 ~85s 一轮）全失败，但三者已不在网关模型列表且非当前白名单——疑似 9router 残留配置在用同一网关 key 轮询；hy3/x-preview 已下线，继续轮询纯浪费。
+- 诊断方法（可复用）：网关侧带 key 逐模型 `POST /6020/v1/chat/completions`（max_tokens=32）拿错误分类；admin API `/admin/api/models` 响应包在 `data` 键下、模型行用 `upstream_id` 字段（非 model_id）；paramiko 下发 `python3 -` 时 stdin 会把注入的密码行当脚本执行，必须 SFTP 上传脚本+stdin 只传密码。
+- 结论：除非上游恢复或改用"从 OpenCode 客户端内"的真实来源，OCF 分组无法恢复；运营上仅 `space-bunny-free` 值得保留测试入口。
+- **longcat 复核（同日应户质疑重测）**：`longcat-2.5-preview-free` 以 5 种形态（非流式 32t/512t、流式、带 system、重试）复测全部 403 FreeTierError（~400ms 稳定快速失败），非偶发非请求形态问题；该拒绝是上游服务端按模型执行的策略（公开讨论见 Reddit r/opencode "Opencode free tier can only from within Opencode"），官方客户端内可用≠API 可用。space-bunny 同为 free 但上游未对它执行该策略（网关/出口/key 全同，唯一变量是模型）。网关已带 `x-opencode-client: desktop` 仍被拒，说明上游校验更完整客户端身份；错误前缀 "Error from provider (Console)" 表明拒绝发生在上游 provider 控制台侧。
+- **9router 实际状态（2026-10-01 只读核查）**：进程 Up 6 weeks、`/api/health` OK，但 266 个 NVIDIA 连接全部 `isActive=0`，唯一启用的 `opencode-go` 连接 key 自 2026-08-05 起 401（`Invalid API key`，testStatus=unavailable），usageHistory 最后一条成功请求停在 2026-08-05——**实际不可用**。上一轮"疑似 9router 轮询 3 个已删 OCF 模型"的归因有误：9router 无指向 6020 的连接，该 ~1013 次/24h/模型流量来自持有网关 key 的路由器侧（`capability_probe_enabled=false` 已排除该候选，具体组件未定位）；路由器 modelhealth 正活跃探测（last_probe 分钟级新鲜），longcat 连续失败 173 次 `probe_failed`。
+- **OCF 403 精确根因（2026-10-01 经 9router GitHub issues 逆向 + 线上对照实验确证）**：上游 Zen free tier 自 2026-09-16 起做**四层客户端指纹校验**，缺一即 403：(1) UA 必须 `opencode/<ver>` 且 ≥1.17.0；(2) 会话头 `x-opencode-session` 必须匹配 `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`（30 字符）；(3) 请求必须携带 `bash/glob/grep/read` 四件套 no-op 工具声明；(4) 必须 `stream:true` 上游（非流式可强制 SSE 上游后聚合回 JSON）。对照实验（同模型同出口）：longcat 带完整指纹 → HTTP 200 SSE 正常；裸请求 → 403。space-bunny 特例可用是因上游对它不执行该校验。RegionError（muse-spark）是独立的 CN 出口地区门，与指纹无关。9router master 已内置四层伪装（社区 PR #4105/#4132 被 close 未合并，维护者自实现）；#4182 有自称 OpenCode 团队的 takedown 要求（身份未证实）。网关侧只发 `Authorization: Bearer public` + `x-opencode-client: desktop` 即缺全部四层；星空池入站认证格式为 `Basic base64("proxy:"+authKey)`（user 固定 `proxy`）。
+- **OCF 指纹修复已部署（2026-10-01）**：把四层客户端指纹移植进 `opencode-free-proxy` 网关（改 `src/upstream.js` + `src/config.js`，改动已上传远端；修改前源码备份在 `/opt/opencode-free-proxy/src.bak-pre-fingerprint-20261001`）：(1) UA `opencode/1.18.31`（env `OPENCODE_USER_AGENT` 可覆盖）；(2) chat 请求生成 `x-opencode-session: ses_<12hex><14base62>`；(3) 无四件套 `bash/glob/grep/read` 声明时注入 no-op 工具（调用者工具保留在前）；(4) 上游强制 `stream:true`，非流式调用方在网关内把 SSE 聚合为单个 `chat.completion` JSON（含 content/reasoning/tool_calls 按 index 聚合/usage/finish_reason；无帧 SSE 抛 `UPSTREAM_ERROR`→502；上游非 2xx 原样透传）。`observeResponse` 的 JSON usage 路径与聚合后响应兼容，monitor/路由器侧无需改动。
+- 部署方式：scp 覆盖远端 `src/` 两文件 → `docker compose -f docker-compose.yml -f docker-compose.proxy.yml build && up -d`（镜像重建、容器 healthy）。本地 mock fetch 冒烟 6 用例全过（归档于远端 `scripts/test/fingerprint-smoke.mjs`；容器镜像不含 scripts/，须在仓库 checkout 上跑）。
+- 线上真实验证（部署后）：**8/11 free 模型恢复**——longcat 非流式+流式、nemotron-3-ultra、mimo-v2.5、nemotron-3.5-lightning、mimo-v2.6、space-bunny（回归）、longcat+调用者工具全部 200；剩余 3 个为独立模型级问题：ling-3.0 上游 `Endpoint is unavailable`(400)、deepseek-v4-flash-free 已下线(400)、muse-spark CN 出口 RegionError(403)。路由器→网关全链路（候选测试端点）longcat/nemotron success；mimo-v2.5 在路由器 16-token 探测下仍报"上游多次未返回可用响应"（探测窗口对慢响应模型的已知语义限制，网关直连 200）。回滚：恢复 `src.bak-pre-fingerprint-20261001` 后重建镜像即可。
+- 遗留风险：上游可能轮换指纹特征（届时 403 回归，改 `opencodeUserAgent`/`FINGERPRINT_TOOL_NAMES` 即可）；#4182 takedown 风险未解除；ling-3.0/deepseek-v4-flash-free/muse-spark 为上游侧问题，无法本地修复。

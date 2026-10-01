@@ -327,7 +327,7 @@ func (s *Service) applyProbeTools(ctx context.Context, id int64, status string) 
 }
 
 func marshalProbeBody(model string, tools, reasoning map[string]any) ([]byte, error) {
-	return marshalProbeBodyWithLimit(model, tools, reasoning, modelProbeMaxTokens,
+	return marshalProbeBodyWithLimit(model, tools, reasoning, ocfProbeMaxTokens,
 		[]map[string]string{{"role": "user", "content": "Reply with exactly OK."}})
 }
 

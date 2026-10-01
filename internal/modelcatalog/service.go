@@ -57,6 +57,13 @@ const (
 	modelVerificationTimeout    = 30 * time.Second
 	maxModelVerificationTimeout = 5 * time.Minute
 	modelProbeMaxTokens         = 16
+	// ocfProbeMaxTokens bounds the OpenCodeFree base probes. Gateway models spend
+	// output tokens on invisible chat-template markers before any visible text
+	// (observed: a 16-token window on mimo-v2.5-free returned 200 with empty
+	// content, flagging a working model as unusable), and hidden reasoning eats
+	// the budget the same way. Probes are operator-triggered, so the larger
+	// window costs nothing against a wrong verdict.
+	ocfProbeMaxTokens = 256
 	// toolsProbeMaxTokens bounds the tool-calling probe specifically. Gateway
 	// models frequently emit hidden reasoning (or truncated argument JSON)
 	// before the tool_call; a 16-token window turned every such model into a
@@ -473,11 +480,11 @@ func (s *Service) testOpenCodeFreeModel(ctx context.Context, model Model) error 
 	body, err := json.Marshal(map[string]any{
 		"model":    model.UpstreamID,
 		"messages": []map[string]string{{"role": "user", "content": "ping"}},
-		// modelProbeMaxTokens, not 1: several free-tier models spend their whole
-		// budget before emitting visible text, so a one-token answer comes back
-		// 200 with empty content and fails payload validation. The NVIDIA base
-		// probe and the detailed OCF probe already use this budget.
-		"max_tokens": modelProbeMaxTokens,
+		// ocfProbeMaxTokens, not 1: free-tier models spend their whole budget on
+		// invisible template tokens before emitting visible text, so a tiny
+		// answer comes back 200 with empty content and fails payload validation.
+		// The detailed OCF probes share this budget.
+		"max_tokens": ocfProbeMaxTokens,
 	})
 	if err != nil {
 		return err
