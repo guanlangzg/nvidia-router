@@ -175,9 +175,25 @@ func classifyOpenCodeFreeStatus(response *http.Response, allowRetry bool) (bool,
 		}
 		return false, fault.New(status, fault.ScopeUpstreamGlobal, "server_error", "upstream_unavailable", message, nil)
 	}
-	return false, &apierror.Error{
+	mapped := &apierror.Error{
 		Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_error", Message: message,
 	}
+	// The OpenCode provider layer wraps its own failures — transient ones
+	// included — as a 400 invalid_request_error carrying "Error from provider".
+	// Replaying the identical conversation succeeds moments later (measured on
+	// the free tier: about one agent-loop turn in twelve), so this costs one
+	// wasted call and saves the loop; the verdict stays upstream_error because a
+	// genuinely rejected request must not read as retryable to the client.
+	if response.StatusCode == http.StatusBadRequest && isRelayedProviderError(message) {
+		return allowRetry, mapped
+	}
+	return false, mapped
+}
+
+// isRelayedProviderError reports whether an error body is the provider layer's
+// own failure envelope rather than a complaint about the request.
+func isRelayedProviderError(message string) bool {
+	return strings.Contains(strings.ToLower(message), "error from provider")
 }
 
 func isOpenCodeFreeTransientStatus(status int) bool {

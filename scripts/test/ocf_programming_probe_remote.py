@@ -12,10 +12,14 @@ answered plausibly.
 
 Modes (passed by ``remote_exec.py --arg MODE=...``):
     state      snapshot of catalog, candidates, pool gauge and gateway
+    reprobe    force the detailed capability probe on enabled OCF models
     chat       non-streaming /v1/chat/completions tool loop
     stream     streaming /v1/chat/completions tool loop (agent clients stream)
     responses  /v1/responses tool loop (Codex path)
     all        chat + stream + responses for every enabled OCF model
+
+TOOLSET is a second placeholder (--arg TOOLSET=standard) that adds the
+bash/glob/grep/read quartet the OpenCode fingerprint shim injects on its own.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -134,6 +139,27 @@ SYSTEM_PROMPT = (
     "files, edit code and run the tests. Do not guess file contents: read them first. Fix the bug "
     "in the source file rather than editing the tests. Reply with one short sentence when the tests pass."
 )
+
+# The OpenCodeFree gateway satisfies the upstream fingerprint check by appending
+# no-op bash/glob/grep/read tools whenever the caller does not declare them
+# (/opt/opencode-free-proxy/src/upstream.js ensureFingerprintTools). Real coding
+# agents declare that quartet, so the injection is invisible to them; a caller
+# with a custom tool set sees the model call tools it was never offered. TOOLSET
+# =standard reproduces the real-agent shape.
+TOOLSET = "__TOOLSET__"
+FINGERPRINT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "Built-in %s tool provided by the OpenCode client." % name,
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    for name in ("bash", "glob", "grep", "read")
+]
+if TOOLSET == "standard":
+    TOOLS.extend(FINGERPRINT_TOOLS)
 
 admin_opener = None
 access_key = {"id": None, "key": None}
@@ -251,6 +277,11 @@ def post_json(path, payload, timeout=REQUEST_TIMEOUT, stream=False):
             payload = json.loads(error.read(1 << 20))
             err = payload.get("error", {}) if isinstance(payload, dict) else {}
             record["error_code"] = err.get("code") or err.get("type")
+            # The upstream body is the only place that says why a provider
+            # refused; collapse whitespace and cap it so it stays readable.
+            message = re.sub(r"\s+", " ", str(err.get("message") or "")).strip()
+            if message:
+                record["error_message"] = message[:200]
         except Exception:  # noqa: BLE001
             record["error_code"] = "unparseable"
         return record, None
@@ -446,11 +477,9 @@ def responses_turn(model, items, stream=False):
         "tool_choice": "auto",
         "max_output_tokens": 2048,
     }
-    record, response = post_json("/v1/responses", payload, timeout=REQUEST_TIMEOUT)
-    if response is None or record["status"] != 200:
+    record, body = post_json("/v1/responses", payload, timeout=REQUEST_TIMEOUT)
+    if body is None or record["status"] != 200:
         return record, None
-    body = response.read(1 << 24)
-    response.close()
     output = body.get("output") or []
     calls, text = [], []
     for item in output:
@@ -576,6 +605,36 @@ def report_state():
     log("POOL", status=status, healthy=healthy)
 
 
+def reprobe_ocf_models():
+    """Run the detailed capability probe now instead of waiting for the cycle."""
+    models = enabled_models("opencodefree")
+    if not models:
+        log("REPROBE", error="no enabled opencodefree models")
+        return
+    status, body = call_admin("POST", "/admin/api/model-test-jobs", {
+        "model_ids": [item["id"] for item in models],
+        "mode": "sequential",
+    })
+    job = unwrap(body) if status in (200, 201, 202) else {}
+    log("REPROBE", step="create", status=status, job_id=bool(job.get("id")))
+    if not job.get("id"):
+        return
+    job_id = job["id"]
+    for _ in range(180):
+        status, body = call_admin("GET", "/admin/api/model-test-jobs/" + job_id)
+        job = unwrap(body) if status == 200 else {}
+        if job.get("status") in ("completed", "failed", "cancelled"):
+            break
+        time.sleep(5)
+    for result in job.get("results") or []:
+        probe = result.get("probe") or {}
+        log("REPROBE_RESULT", public_id=result.get("public_id"), status=result.get("status"),
+            error=result.get("error"), base=probe.get("base"),
+            reasoning=probe.get("reasoning"), tools=probe.get("tools"),
+            duration_ms=result.get("duration_ms"))
+    report_state()
+
+
 def main():
     global admin_opener
     admin_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
@@ -587,6 +646,9 @@ def main():
     try:
         if MODE == "state":
             report_state()
+            return 0
+        if MODE == "reprobe":
+            reprobe_ocf_models()
             return 0
         status, body = call_admin("POST", "/admin/api/access-keys", {"name": RUN_TAG})
         created = unwrap(body) if status == 201 else {}

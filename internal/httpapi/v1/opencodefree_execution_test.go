@@ -122,6 +122,74 @@ func TestOpenCodeFreeExecutionMaps436ToBadGateway(t *testing.T) {
 	}
 }
 
+func TestOpenCodeFreeExecutionReplaysRelayedProviderErrorOnce(t *testing.T) {
+	const relayed = `{"error":{"type":"invalid_request_error","message":"Error from provider (Console): Upstream request failed: [invalid_request_error] invalid request"}}`
+	var calls, waits int
+	execution := newOCFExecution(func(context.Context, bool) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			response, _ := newOCFResponse(http.StatusBadRequest, relayed)
+			return response, nil
+		}
+		response, _ := newOCFResponse(http.StatusOK, "ok")
+		return response, nil
+	}, &waits)
+
+	err := execution.run(context.Background(), false, &firstWriteTracker{}, func(context.Context, *http.Response) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("run error = %v, want the replay to succeed", err)
+	}
+	if calls != 2 || waits != 1 {
+		t.Fatalf("calls = %d waits = %d, want 2/1", calls, waits)
+	}
+}
+
+// A plain client-style 400 is still terminal, and a replayed provider error
+// that repeats must keep the original upstream_error verdict.
+func TestOpenCodeFreeExecutionDoesNotReplayOrdinaryBadRequest(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    int
+		body      string
+		wantCalls int
+	}{
+		{name: "provider envelope repeats", status: http.StatusBadRequest,
+			body:      `{"error":{"message":"Error from provider (Console): Upstream request failed: [invalid_request_error] invalid request"}}`,
+			wantCalls: 2},
+		{name: "request complaint", status: http.StatusBadRequest,
+			body:      `{"error":{"message":"tools must be an array"}}`,
+			wantCalls: 1},
+		{name: "unprocessable", status: http.StatusUnprocessableEntity,
+			body:      `{"error":{"message":"model is unavailable"}}`,
+			wantCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls, waits int
+			execution := newOCFExecution(func(context.Context, bool) (*http.Response, error) {
+				calls++
+				response, _ := newOCFResponse(test.status, test.body)
+				return response, nil
+			}, &waits)
+
+			err := execution.run(context.Background(), false, &firstWriteTracker{}, func(context.Context, *http.Response) error {
+				return nil
+			})
+			var publicErr *apierror.Error
+			if !errors.As(err, &publicErr) {
+				t.Fatalf("error = %T %v, want *apierror.Error", err, err)
+			}
+			if publicErr.Status != http.StatusBadGateway || publicErr.Code != "upstream_error" {
+				t.Fatalf("error = %#v, want 502 upstream_error", publicErr)
+			}
+			if calls != test.wantCalls {
+				t.Fatalf("calls = %d, want %d", calls, test.wantCalls)
+			}
+		})
+	}
+}
+
 func TestOpenCodeFreeExecutionRetries503OnceThenSucceeds(t *testing.T) {
 	var calls, waits int
 	first, firstBody := newOCFResponse(http.StatusServiceUnavailable, "retry")
