@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
+from collections import deque
 from pathlib import Path
 
 import paramiko
@@ -42,17 +44,34 @@ def connect() -> paramiko.SSHClient:
 def run(client: paramiko.SSHClient, command: str, timeout: int = 1800, check: bool = True) -> str:
     print(f"$ {command}", flush=True)
     _, stdout, stderr = client.exec_command(command, timeout=timeout)
-    output = stdout.read().decode("utf-8", "replace")
-    status = stdout.channel.recv_exit_status()
-    error = stderr.read().decode("utf-8", "replace")
-    tail = "\n".join(output.splitlines()[-15:])
-    if tail:
-        print(tail, flush=True)
+    channel = stdout.channel
+    output_lines: deque[str] = deque(maxlen=200)
+    errors: deque[str] = deque(maxlen=200)
+    lock = threading.Lock()
+
+    def drain(stream: paramiko.ChannelFile, lines: deque[str], target: object) -> None:
+        for line in stream:
+            decoded = line.decode("utf-8", "replace") if isinstance(line, bytes) else line
+            with lock:
+                lines.append(decoded.rstrip("\r\n"))
+            print(decoded, end="", file=target, flush=True)
+
+    stdout_thread = threading.Thread(target=drain, args=(stdout, output_lines, sys.stdout))
+    stderr_thread = threading.Thread(target=drain, args=(stderr, errors, sys.stderr))
+    stdout_thread.start()
+    stderr_thread.start()
+    stdout_thread.join(timeout)
+    stderr_thread.join(timeout)
+    if stdout_thread.is_alive() or stderr_thread.is_alive():
+        channel.close()
+        raise TimeoutError(f"remote command timed out after {timeout}s: {command}")
+
+    status = channel.recv_exit_status()
     if status != 0:
-        print(error[-2000:], file=sys.stderr, flush=True)
+        error = "\n".join(errors)
         if check:
-            raise SystemExit(f"step failed (exit {status}): {command}")
-    return output
+            raise SystemExit(f"step failed (exit {status}): {command}\n{error[-2000:]}")
+    return "\n".join(output_lines)
 
 
 def main() -> int:
