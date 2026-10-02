@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"nvidia-router/internal/observability"
@@ -207,7 +208,14 @@ func (s *Service) probeReasoning(ctx context.Context, model Model, call probeCha
 			}
 			return reasoningProbe{status: status, support: true, wire: wire}, wire, nil
 		case probeHTTPUnsupported:
-			continue
+			// Only a refusal that names reasoning proves the model lacks it; a
+			// 403 free-tier or auth refusal proves the request never ran, so it
+			// must leave the stored verdict untouched instead of writing
+			// supports_reasoning=false.
+			if rejectsCapability(payload, reasoningRejectionMarkers) {
+				continue
+			}
+			transient = true
 		case probeHTTPTransient:
 			transient = true
 		}
@@ -295,7 +303,16 @@ func (s *Service) attemptToolsProbe(_ context.Context, model Model, call probeCh
 	}
 	switch class {
 	case probeHTTPUnsupported:
-		return toolsAttempt{negative: true}, nil
+		// A 4xx only speaks to tool support when it complains about the
+		// tools themselves. Auth, free-tier policy, region and
+		// model-not-found answers say whether the request may run at all,
+		// and counting them as capability evidence stamped permanent
+		// "unsupported" rows on every OpenCodeFree model during the 403
+		// free-tier window (2026-10-01).
+		if rejectsCapability(payload, toolRejectionMarkers) {
+			return toolsAttempt{negative: true}, nil
+		}
+		return toolsAttempt{transient: true}, nil
 	case probeHTTPTransient:
 		return toolsAttempt{transient: true}, nil
 	case probeHTTPSuccess:
@@ -358,9 +375,14 @@ func marshalProbeReasoningBodyForProvider(provider, model, wire string) ([]byte,
 }
 
 // probeToolsInstruction is the explicit prompt paired with tool_choice:"auto".
-// Several gateway models accept the required form but ignore its semantics;
-// only an imperative instruction reliably draws a tool_call from them.
-const probeToolsInstruction = "You must call the weather tool."
+// It has to be a concrete task that already carries the tool's required
+// argument: "You must call the weather tool." reads as a request for
+// confirmation, and models that do support tool calling answer it in prose
+// ("Which city?"). Both forms then looked silent, the probe wrote
+// ToolsStatusUnsupported, and every later agentic request failed with 501 for
+// models that had been calling tools all along (verified on four OpenCodeFree
+// gateway models, 2026-10-02).
+const probeToolsInstruction = "Use the weather tool to get the current weather in Paris, then summarize it in one sentence."
 
 func marshalProbeToolsBody(model, toolChoice string) ([]byte, error) {
 	message := "Reply with exactly OK."
@@ -384,6 +406,30 @@ func marshalProbeToolsBody(model, toolChoice string) ([]byte, error) {
 			"tool_choice": toolChoice,
 		}, nil, toolsProbeMaxTokens,
 		[]map[string]string{{"role": "user", "content": message}})
+}
+
+// Capability rejection markers. A 4xx body is only evidence about the probed
+// capability when it names that capability; everything else describes the
+// request's permission to run.
+var (
+	toolRejectionMarkers      = []string{"tool", "function_call", "function call"}
+	reasoningRejectionMarkers = []string{"reasoning", "thinking", "effort"}
+)
+
+// rejectsCapability reports whether a 4xx body explicitly refuses the probed
+// capability. Treating every 4xx as a capability answer is what wrote permanent
+// "unsupported" verdicts for models that were only temporarily unauthorized:
+// the OpenCodeFree gateway answers an unknown or free-tier-blocked model with
+// 401/403, and the OpenCode free tier answers legitimate calls with 403 while
+// refusing nothing about their abilities.
+func rejectsCapability(body []byte, markers []string) bool {
+	text := strings.ToLower(string(body))
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func readProbeChat(response *http.Response) ([]byte, probeHTTPClass, error) {

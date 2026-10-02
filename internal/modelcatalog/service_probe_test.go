@@ -493,8 +493,8 @@ func TestToolsProbeTriesAutoFallbackWhenRequiredYieldsNoCalls(t *testing.T) {
 		t.Fatalf("fallback tool_choice = %v, want auto", autoForm["tool_choice"])
 	}
 	messages, _ := autoForm["messages"].([]any)
-	if len(messages) != 1 || !strings.Contains(messages[0].(map[string]any)["content"].(string), "must call the weather tool") {
-		t.Fatalf("fallback message = %v, want explicit instruction", messages)
+	if len(messages) != 1 || messages[0].(map[string]any)["content"].(string) != probeToolsInstruction {
+		t.Fatalf("fallback message = %v, want the concrete probe task", messages)
 	}
 	var stored string
 	db := serviceRepositoryDB(t, service)
@@ -580,4 +580,139 @@ func TestToolsProbeFourXXOnRequiredFallsBackToAuto(t *testing.T) {
 		t.Fatalf("probe.Tools = %q, want supported (auto form rescued)", summary.Tools)
 	}
 	_ = service
+}
+
+// The auto form must ask for a concrete task, not a confirmation: an ambiguous
+// instruction is answered in prose by models that do support tool calling, both
+// forms then look silent and the probe writes a permanent "unsupported" that
+// blocks every agentic request with 501 (2026-10-02, four OpenCodeFree models).
+func TestToolsProbeAutoFormAsksForAConcreteTask(t *testing.T) {
+	service, discoverer, modelID := detailedProbeService(t, "tools-concrete")
+	discoverer.chatResponses = []string{
+		`{"choices":[{"message":{"content":"ok"}}]}`, // base
+		`{"choices":[{"message":{"content":"ok"}}]}`, // reasoning
+		`{"choices":[{"message":{"content":"ok"}}]}`, // required form: silent
+		toolsProbeCallBody,                           // auto form: calls
+	}
+
+	if _, err := service.TestModelAutoDetailed(context.Background(), modelID); err != nil {
+		t.Fatalf("TestModelAutoDetailed: %v", err)
+	}
+	var autoForm map[string]any
+	if err := json.Unmarshal(discoverer.chatBodies[3], &autoForm); err != nil {
+		t.Fatalf("decode auto form: %v", err)
+	}
+	messages, _ := autoForm["messages"].([]any)
+	prompt, _ := messages[0].(map[string]any)["content"].(string)
+	if !strings.Contains(prompt, "Paris") {
+		t.Fatalf("auto form prompt = %q, want a task that supplies the tool's required argument", prompt)
+	}
+}
+
+// Auth, free-tier policy and unknown-model refusals say nothing about a model's
+// abilities. Counting them as capability evidence is what kept every
+// OpenCodeFree model at tools_status=unsupported through the 403 free-tier
+// window and permanently behind 501.
+func TestToolsProbeIgnoresNonCapabilityRefusals(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "free tier policy", status: 403, body: `{"error":{"message":"OpenCode's free tier can only be used from within OpenCode"}}`},
+		{name: "region policy", status: 403, body: `{"error":{"message":"This model is not available in your country"}}`},
+		{name: "unknown model", status: 401, body: `{"error":{"message":"Model vendor/x is not supported"}}`},
+		{name: "model retired", status: 400, body: `{"error":{"message":"Model is unavailable"}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, discoverer, modelID := detailedProbeService(t, "tools-refused")
+			discoverer.chatStatuses = []int{200, 200, test.status, test.status}
+			discoverer.chatResponses = []string{
+				`{"choices":[{"message":{"content":"ok"}}]}`,
+				`{"choices":[{"message":{"content":"ok"}}]}`,
+				test.body,
+				test.body,
+			}
+
+			summary, err := service.TestModelAutoDetailed(context.Background(), modelID)
+			if err != nil {
+				t.Fatalf("TestModelAutoDetailed: %v", err)
+			}
+			if summary.Tools != ProbeStatusUnknown {
+				t.Fatalf("probe.Tools = %q, want unknown (the refusal is not capability evidence)", summary.Tools)
+			}
+			var status string
+			var verifiedAt sql.NullString
+			db := serviceRepositoryDB(t, service)
+			if err := db.QueryRow(`SELECT tools_status, tools_verified_at FROM models WHERE id = ?`, modelID).
+				Scan(&status, &verifiedAt); err != nil {
+				t.Fatalf("load stored tools verdict: %v", err)
+			}
+			if status != ToolsStatusUnknown || verifiedAt.Valid {
+				t.Fatalf("stored tools verdict = %q/%v, want unknown and unverified", status, verifiedAt)
+			}
+		})
+	}
+}
+
+// The same rule applies to the reasoning probe: a 403 refusal must not write
+// supports_reasoning=false, which would strip reasoning from a working model.
+func TestReasoningProbeIgnoresNonCapabilityRefusals(t *testing.T) {
+	service, db, secrets, discoverer := newCatalogTestService(t)
+	secrets.availableIDs = []int64{11}
+	publicID := "reasoning-refused"
+	if err := service.SaveSelection(context.Background(), []Selection{{
+		PublicID: publicID, UpstreamID: "vendor/" + publicID, DisplayName: publicID, Kind: KindChat,
+		SupportsReasoning: true, ReasoningWireFormat: "openai", ReasoningStatus: ReasoningStatusVisible,
+	}}); err != nil {
+		t.Fatalf("SaveSelection: %v", err)
+	}
+	modelID := modelIDByPublicID(t, db, publicID)
+	refusal := `{"error":{"message":"OpenCode's free tier can only be used from within OpenCode"}}`
+	discoverer.chatStatuses = []int{200, 403, 403, 403}
+	discoverer.chatResponses = []string{
+		`{"choices":[{"message":{"content":"ok"}}]}`,
+		refusal,
+		refusal,
+		refusal,
+	}
+
+	summary, err := service.TestModelAutoDetailed(context.Background(), modelID)
+	if err != nil {
+		t.Fatalf("TestModelAutoDetailed: %v", err)
+	}
+	if summary.Reasoning != ProbeStatusUnknown {
+		t.Fatalf("probe.Reasoning = %q, want unknown", summary.Reasoning)
+	}
+	var supports bool
+	var status string
+	if err := serviceRepositoryDB(t, service).QueryRow(
+		`SELECT supports_reasoning, reasoning_status FROM models WHERE id = ?`, modelID).
+		Scan(&supports, &status); err != nil {
+		t.Fatalf("load stored reasoning verdict: %v", err)
+	}
+	if !supports || status != ReasoningStatusVisible {
+		t.Fatalf("stored reasoning verdict = %v/%q, want the previous claim left untouched", supports, status)
+	}
+}
+
+// A refusal that does name the capability is still a negative answer, so the
+// 4xx fallback keeps working for gateways that only accept tool_choice:"auto".
+func TestToolsProbeCapabilityRefusalStaysNegative(t *testing.T) {
+	service, discoverer, modelID := detailedProbeService(t, "tools-capability-refusal")
+	discoverer.chatStatuses = []int{200, 200, 400, 400}
+	discoverer.chatResponses = []string{
+		`{"choices":[{"message":{"content":"ok"}}]}`,
+		`{"choices":[{"message":{"content":"ok"}}]}`,
+		`{"error":{"message":"tool_choice required not supported"}}`,
+		`{"error":{"message":"tools are not supported by this model"}}`,
+	}
+
+	summary, err := service.TestModelAutoDetailed(context.Background(), modelID)
+	if err != nil {
+		t.Fatalf("TestModelAutoDetailed: %v", err)
+	}
+	if summary.Tools != ProbeStatusUnsupported {
+		t.Fatalf("probe.Tools = %q, want unsupported", summary.Tools)
+	}
 }
