@@ -8,6 +8,7 @@
 - 处理服务器前依次读取：项目 AGENTS.md、服务器管理/AGENTS.md、目标目录 AGENTS.md 与 memory.md、部署脚本、Compose 和部署说明。
 - 单体路由器内置 XApi 采集、验证、池管理和 CONNECT；池未就绪时必须失败，不得静默直连。
 - OpenCodeFree 候选发现和 `SyncOpenCodeFreeModels` 均只把 `-free` 后缀模型视为可用；同步时非 free 网关条目不会保持本地模型启用，网关请求失败仍不改库。
+- 能力探测的判定必须能被公平重算：歧义提问和鉴权/策略类 4xx 都不得写成永久 `unsupported`；探测改动后必须用 `POST /admin/api/model-test-jobs` 强制重探测核对，而不是等周期探测。
 - XApi 完整地址、provider 凭据、主密钥、管理员密码、NVIDIA Key 和 SSH 私钥只通过运行时 Secret 注入；命令输出、日志、Git、文档和记忆中只允许出现脱敏值。
 - 当前公网入口为 HTTP；管理员密码、Cookie、Access Key、请求和响应存在明文传输风险。生产 HTTPS 需要受信反向代理、Secure Cookie、External Origin 和 Trusted Proxy CIDR。
 
@@ -104,15 +105,16 @@ git diff --check
 - 本地 3756 可能被旧 nvidia-router.exe 占用；运行 E2E/视觉探针前确认实际端口和嵌入资源版本。
 - 一次性诊断脚本放临时目录，含 Secret 时使用 umask 077/权限 600，验证后清理。
 
-## 8. 当前线上状态（最后核验：2026-08-23）
+## 8. 当前线上状态（最后核验：2026-10-02）
 
-- 源码：main@cfcaecf。
-- Release：/opt/nvidia-router-releases/20260823-redeploy-cfcaecf。
-- 镜像：nvidia-router:deploy-20260823-redeploy-cfcaecf。
-- 回滚点：20260823-ui-polish-worktree / nvidia-router:deploy-20260823-ui-polish-worktree。
-- 切换前数据库备份：/opt/nvidia-router-releases/20260823-redeploy-cfcaecf/backups/predeploy-20260823-redeploy-cfcaecf/router.db，权限 600。
-- 已核验：app healthy、重启 0、OOM false；schema 42；enabled 模型 10 个；live/ready、关键健康端点、根页和新静态资源正常；匿名业务与 metrics 鉴权正常；部署后错误签名为 0。
-- 最近一次确认性重部署未执行管理员会话、真实模型、代理轮换或 CONNECT 矩阵；不要把上述免认证结果当作完整 live/E2E。
+- 源码：main@00c75d2（分支 `codex/optimize-executor-20260828`，含 4fca032/d54a2d5）。
+- Release：`/opt/nvidia-router-releases/20261002-ocf-provider-retry-00c75d2`。
+- 镜像：`nvidia-router:deploy-20261002-ocf-provider-retry-00c75d2`。
+- 回滚点：`20261002-ocf-tools-probe-4fca032` / `nvidia-router:deploy-20261002-ocf-tools-probe-4fca032`（再往前 `20261002-reasoning-probes-5f944db`）。
+- 切换前数据库备份：两版各一份 `backups/predeploy-<版本号>/router.db`，约 19,349,504 字节，`600`，属主 `10001:10001`。
+- 已核验：app `running/healthy`、重启 0、OOM false；`/health/live`、`/health/ready`、根页 200；匿名 `/v1/models`、`/metrics`、`/admin/api/models/candidates` 均 401；3756 与 6020 监听（代理池按设计只走内网，无宿主端口）；近 20 分钟 panic/fatal/ERROR 签名 0。
+- 启用模型 3：NVIDIA `nvidia/nemotron-3-ultra-550b-a55b`、OCF `opencodefree/longcat-2.5-preview-free`、OCF `opencodefree/space-bunny-free`；两个 OCF 模型 `supports_tools=true`/`tools_status=supported`（见 §43）。
+- 未执行 CONNECT 矩阵与 NVIDIA 渠道真实请求；公网 HTTP 明文风险保持不变。
 
 ## 9. 价格功能移除（2026-08-23）
 
@@ -474,3 +476,35 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
 - 门禁：`go test ./...` 全过（删除/改写 9 个测试文件）、go vet、gofmt、git diff --check。提交时误 `git add -A` 带入 `.worktrees/` embedded repo，已 `git rm --cached` + amend 修正并加入 .gitignore——`git add -A` 前先看 status 里未跟踪目录。
 - 标准发布版本 `20261001-reasoning-passthrough-370dbc3`，Release/镜像同名；回滚点 `20261001-ocf-probe-budget-fdbe7bf`；切换前备份 `backups/predeploy-20261001-reasoning-passthrough-370dbc3/router.db`（19,349,504 字节，600，10001:10001）。
 - 线上真实验证（临时 Key，已删）：`opencodefree/longcat-2.5-preview-free` 五场景全 200——effort=high（off-profile，旧版本地 501，现到达上游且返回真实 reasoning_content）、effort=none、无参数回归、thinking 对象、流式+effort=high（17 chunks 带 [DONE]）。启动日志 `unexpressible profiles count=2`（longcat/space-bunny）仍为 advisory 告警，不影响请求。
+
+## 2026-10-02 杭州服务器 reasoning-probes 部署已完成
+
+- GitHub `main` 部署目标 `5f944db4ba4620ab69a8b7aa03d063db5db97be9`（`fix: bound probes and preserve reasoning aliases`）已按强制流程部署。
+- Release `/opt/nvidia-router-releases/20261002-reasoning-probes-5f944db`，镜像 `nvidia-router:deploy-20261002-reasoning-probes-5f944db`；回滚点 `20261001-reasoning-passthrough-370dbc3`。切换前数据库备份与验证结果见对应既有发布记录。
+- 后续 2026-10-02 OpenCodeFree 代理依赖恢复记录见本文件上方同日条目；代理池使用独立版本化镜像，不代表 Router 源码重新发布。
+
+## 2026-10-02 OpenCodeFree 代理依赖恢复
+
+- 根因：`/opt/star-proxy-pool` 旧构建目录中 `internal/forwarder/transport.go` 使用 `config.Runtime.DisableKeepAlives`，但远端 `internal/config/config.go` / `runtime.go` 文件不匹配，Dockerfile 的 `go test ./...` 编译失败；目录无可核验 Git HEAD。本地星空代理池干净提交 `c20c0e0ae6d02757fbf7219dfa68f2c638fe7503` 的全量 `go test ./...` 通过。
+- 未覆盖远端 `.env`、`data/` 或 runtime-config；从提交归档部署到 `/opt/star-proxy-pool/releases/20261002-ocf-pool-c20c0e0`，关键源码与归档字节校验一致。构建镜像 `star-proxy-pool:deploy-20261002-ocf-pool-c20c0e0`（image ID `sha256:81fca0f9181c9fb5f40859a8c5ba31959233631c02614331d26a6a46d7d768b3`），Docker build 中 Go 全量测试通过。
+- 持久化 Compose 覆盖：`/opt/star-proxy-pool/compose.ocf-internal.yaml`（权限 600），只连接外部 `router-internal`、Docker DNS alias `proxy-pool`，不发布宿主端口；数据卷仍挂载 `/opt/star-proxy-pool/data:/data`。切勿改用 `/root/star-proxy-pool` 公网服务。
+- 验证：代理池 `running/healthy`、重启 0、OOM false；`/healthz=200`；Router 与 OCF 网关容器内访问 `http://proxy-pool:8080/healthz` 均 200；代理池无宿主机端口绑定，数据目录 owner `100:101`。Router 候选测试 `space-bunny-free` 返回 success。使用公开模型 ID `opencodefree/space-bunny-free` 的真实 Router Chat 请求 HTTP 200、1 choice、回复匹配，临时 Access Key 已删除；裸 ID 会得到 `model_not_found`。
+- 遗留：既有 OpenCodeFree 网关镜像仍标为 `opencode-free-proxy-opencode-free-proxy:latest`，image ID `sha256:7c5e52faefa289bec18edbbb05509973effb87e8142dc1e2b7124c0053891daf`，无 OCI 源码 revision/version 标签；本轮未重建或重启它，避免在源码版本不可确认时伪造版本标签。后续需先从可核验源码/提交构建，再固定不可漂移版本。
+- 教训：Windows `core.autocrlf=true` 时 `git archive` 成员可能与 `git show HEAD:path` 的原始 blob 哈希不同；核验发布归档需比较归档成员与远端释放文件，不能直接比较工作树/原始 blob 哈希。
+
+## 43. 2026-10-02 OpenCodeFree 编程可用性修复（4fca032 + 00c75d2）
+
+- **结论**：修复前两个启用 OCF 模型**完全无法用于编程任务**——任何带 `tools` 的请求都被本地能力门控 501 `model_capability_unsupported`；修复后两个模型在 `/v1/chat/completions`（非流式与流式）和 `/v1/responses` 三条路径上都能真正完成 agent 编程循环。
+- **根因一（探测提问歧义）**：`internal/modelcatalog/service_probe.go` 的 tools 探测第二形态用 "You must call the weather tool."，这类模型会用散文回答（"Which city?"）而不是发出 tool_call；两形态都"沉默"就写入永久 `tools_status=unsupported`，此后所有 agent 请求 501。上游实测（`scripts/test/opencodefree_tools_probe_remote.py`）：space-bunny/longcat/nemotron/mimo 四个 free 模型在具体任务（带工具必填参数）下都能产出合法 tool_calls，只有歧义提问失败。修复：提示改成携带工具参数的具体任务。
+- **根因二（4xx 当能力证据）**：`readProbeChat` 把所有 4xx 归为 `probeHTTPUnsupported`，`attemptToolsProbe` 直接判 negative。OCF 在 403 FreeTierError 窗口会给全部模型盖上永久 unsupported，未知模型则是 401 `Model X is not supported`。修复：4xx 只有 body 明确提到该能力（tools / reasoning 关键词）才算能力否定，鉴权、免费额度策略、地区和模型不存在一律视为 unknown、不写库（reasoning 探测同样处理）。
+- **根因三（上游 provider 错误当终态）**：OpenCode provider 层把自身失败包成 400 `invalid_request_error` + "Error from provider (Console): ..."，网关原样透传，`classifyOpenCodeFreeStatus` 视为终态 → 多轮循环中途 502 掉线（实测约每 12 个循环 turn 一次；同一会话重放几秒后即成功）。修复：仅此类 400 在首字节前重放一次，公开错误码仍为 `upstream_error`（不谎称可重试）；普通 400/422 保持终态。
+- 修复后能力探测结果（`POST /admin/api/model-test-jobs` 强制重探测，两轮一致）：两个 OCF 模型 `base=success`、`tools=supported`、`supports_tools=true`。
+- **真实编程任务验证**（`scripts/test/ocf_programming_probe_remote.py`，临时工作区预置 `moving_average` 越界 bug + 4 个 unittest，模型只能用 list_files/read_file/write_file/run_tests 工具，最后以 `python3 -m unittest` 判定）：两个模型 × chat/stream/responses 共 10 次循环全部 `solved=true`（2 失败 → OK），工具参数 JSON 全部合法，无 501/502。
+- 遗留/限制：
+  - OCF 网关 `ensureFingerprintTools` 在调用方未声明时追加 no-op `bash/glob/grep/read`，模型可能调用调用方根本没有的工具（探针里表现为凭空调用 `glob`/`bash` 并浪费轮次）。真实编码 Agent（opencode/Codex）自带这四件套，不受影响；探针用 `--arg TOOLSET=standard` 复现真实 Agent 形态。网关源码无可核验版本，本轮未改。
+  - `nvidia/nemotron-3-ultra-550b-a55b` 仍 `tools_status=unsupported`；重探测时它在 **base** 阶段就失败（NVIDIA 基础探测仍是 `modelProbeMaxTokens=16`），因此能力数据无法刷新。属 NVIDIA 渠道独立问题，未在本轮处理。
+  - OCF 免费档本身不稳（历史上 503/流截断/1% 级成功率）；重放只覆盖单次瞬态，不解决持续故障。
+- 可复用方法：
+  - 上游真值直连网关：`python scripts/test/remote_exec.py scripts/test/opencodefree_tools_probe_remote.py --arg MODELS=<逗号分隔上游ID>`（在网关容器内用路由器同一把 key，含复刻路由器探测形态的 case）。
+  - 编程任务闭环：`... ocf_programming_probe_remote.py --arg MODE=<state|reprobe|chat|stream|responses|all> [--arg TOOLSET=standard] --stdin-env NVIDIA_ROUTER_ADMIN_PASSWORD`；`reprobe` 走 model-test-jobs 强制刷新能力判定，不必等周期探测。
+  - 发布后只读验收：`scripts/test/post_deploy_accept_remote.py`（容器状态/版本/备份/健康/匿名 401/端口/错误签名）。CLI 无 `db verify`；app 运行时 `db backup` 会因进程锁失败，完整性只能靠部署期备份与 `/health/ready`（含 ping + VerifyMigrations）。

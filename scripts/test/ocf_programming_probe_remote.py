@@ -575,10 +575,9 @@ def report_state():
     status, body = call_admin("GET", "/admin/api/models")
     catalog = unwrap(body) if status == 200 else []
     for item in sorted(catalog, key=lambda row: str(row.get("public_id"))):
-        if item.get("provider") != "opencodefree":
-            continue
         log(
             "MODEL",
+            provider=item.get("provider"),
             public_id=item.get("public_id"),
             upstream_id=item.get("upstream_id"),
             enabled=item.get("enabled"),
@@ -605,9 +604,9 @@ def report_state():
     log("POOL", status=status, healthy=healthy)
 
 
-def reprobe_ocf_models():
+def reprobe_models():
     """Run the detailed capability probe now instead of waiting for the cycle."""
-    models = enabled_models("opencodefree")
+    models = enabled_models()
     if not models:
         log("REPROBE", error="no enabled opencodefree models")
         return
@@ -648,7 +647,7 @@ def main():
             report_state()
             return 0
         if MODE == "reprobe":
-            reprobe_ocf_models()
+            reprobe_models()
             return 0
         status, body = call_admin("POST", "/admin/api/access-keys", {"name": RUN_TAG})
         created = unwrap(body) if status == 201 else {}
