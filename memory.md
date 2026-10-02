@@ -7,7 +7,7 @@
 - 星空代理真实联调、部署、重启和线上检查只在国内目标 hangzhou2-2 执行；国外机器不用于星空代理。
 - 处理服务器前依次读取：项目 AGENTS.md、服务器管理/AGENTS.md、目标目录 AGENTS.md 与 memory.md、部署脚本、Compose 和部署说明。
 - 单体路由器内置 XApi 采集、验证、池管理和 CONNECT；池未就绪时必须失败，不得静默直连。
-- OpenCodeFree 候选发现只保留 `-free` 后缀模型进入白名单选择（DiscoverCandidates 过滤）；`SyncOpenCodeFreeModels` 过期同步仍用全量 /models 列表，非 free 模型从未在真实联调中验证可调用。
+- OpenCodeFree 候选发现和 `SyncOpenCodeFreeModels` 均只把 `-free` 后缀模型视为可用；同步时非 free 网关条目不会保持本地模型启用，网关请求失败仍不改库。
 - XApi 完整地址、provider 凭据、主密钥、管理员密码、NVIDIA Key 和 SSH 私钥只通过运行时 Secret 注入；命令输出、日志、Git、文档和记忆中只允许出现脱敏值。
 - 当前公网入口为 HTTP；管理员密码、Cookie、Access Key、请求和响应存在明文传输风险。生产 HTTPS 需要受信反向代理、Secure Cookie、External Origin 和 Trusted Proxy CIDR。
 

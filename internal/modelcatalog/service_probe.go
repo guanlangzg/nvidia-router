@@ -116,7 +116,7 @@ func (s *Service) probeOpenCodeFreeModelDetailed(ctx context.Context, model Mode
 
 func (s *Service) probeChatCapabilities(ctx context.Context, model Model, call probeChatFunc) (ProbeSummary, error) {
 	summary := ProbeSummary{Base: ProbeStatusFailed, Reasoning: ProbeStatusUnknown, Tools: ProbeStatusUnknown}
-	baseBody, err := marshalProbeBody(model.UpstreamID, nil, nil)
+	baseBody, err := marshalProbeBodyForProvider(model.Provider, model.UpstreamID, nil, nil)
 	if err != nil {
 		return summary, err
 	}
@@ -175,7 +175,7 @@ func (s *Service) probeReasoning(ctx context.Context, model Model, call probeCha
 			continue
 		}
 		seen[wire] = struct{}{}
-		body, err := marshalProbeReasoningBody(model.UpstreamID, wire)
+		body, err := marshalProbeReasoningBodyForProvider(model.Provider, model.UpstreamID, wire)
 		if err != nil {
 			return reasoningProbe{}, "", err
 		}
@@ -326,8 +326,12 @@ func (s *Service) applyProbeTools(ctx context.Context, id int64, status string) 
 	return s.repository.applyProbe(ctx, id, probeCapabilityUpdate{ToolsStatus: &status, ToolsVerifiedAt: &verifiedAt}, verifiedAt)
 }
 
-func marshalProbeBody(model string, tools, reasoning map[string]any) ([]byte, error) {
-	return marshalProbeBodyWithLimit(model, tools, reasoning, ocfProbeMaxTokens,
+func marshalProbeBodyForProvider(provider, model string, tools, reasoning map[string]any) ([]byte, error) {
+	maxTokens := modelProbeMaxTokens
+	if provider == ProviderOpenCodeFree {
+		maxTokens = ocfProbeMaxTokens
+	}
+	return marshalProbeBodyWithLimit(model, tools, reasoning, maxTokens,
 		[]map[string]string{{"role": "user", "content": "Reply with exactly OK."}})
 }
 
@@ -346,11 +350,11 @@ func marshalProbeBodyWithLimit(model string, tools, reasoning map[string]any, ma
 	return json.Marshal(body)
 }
 
-func marshalProbeReasoningBody(model, wire string) ([]byte, error) {
+func marshalProbeReasoningBodyForProvider(provider, model, wire string) ([]byte, error) {
 	if wire == "thinking" {
-		return marshalProbeBody(model, nil, map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": 128}})
+		return marshalProbeBodyForProvider(provider, model, nil, map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": 128}})
 	}
-	return marshalProbeBody(model, nil, map[string]any{"reasoning_effort": "high"})
+	return marshalProbeBodyForProvider(provider, model, nil, map[string]any{"reasoning_effort": "high"})
 }
 
 // probeToolsInstruction is the explicit prompt paired with tool_choice:"auto".

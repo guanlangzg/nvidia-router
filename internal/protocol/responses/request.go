@@ -659,28 +659,48 @@ func mapParallelToolCalls(fields map[string]json.RawMessage, chat map[string]jso
 }
 
 func mapReasoning(fields map[string]json.RawMessage, chat map[string]json.RawMessage) error {
-	if native, ok := fields["reasoning_effort"]; ok && !isJSONNull(native) {
+	native, hasNative := fields["reasoning_effort"]
+	if hasNative && !isJSONNull(native) {
 		chat["reasoning_effort"] = native
 	}
 	if raw, ok := fields["reasoning"]; ok && !isJSONNull(raw) {
-		var reasoning struct {
-			Effort json.RawMessage `json:"effort"`
-		}
-		if json.Unmarshal(raw, &reasoning) == nil && len(reasoning.Effort) > 0 {
-			chat["reasoning_effort"] = reasoning.Effort
-		} else {
-			var value string
-			if json.Unmarshal(raw, &value) == nil {
-				chat["reasoning_effort"] = raw
-			} else {
-				chat["reasoning"] = raw
-			}
+		effort, simpleAlias := reasoningEffortAlias(raw)
+		if !simpleAlias {
+			chat["reasoning"] = raw
+		} else if !hasNative || isJSONNull(native) {
+			chat["reasoning_effort"] = effort
+		} else if reasoningAliasValuesConflict(native, effort) {
+			chat["reasoning"] = raw
 		}
 	}
 	if raw, ok := fields["thinking"]; ok && !isJSONNull(raw) {
 		chat["thinking"] = raw
 	}
 	return nil
+}
+
+func reasoningEffortAlias(raw json.RawMessage) (json.RawMessage, bool) {
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return raw, true
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) != 1 || len(object["effort"]) == 0 {
+		return nil, false
+	}
+	return object["effort"], true
+}
+
+func reasoningAliasValuesConflict(native, effort json.RawMessage) bool {
+	reasoning, err := json.Marshal(map[string]json.RawMessage{"effort": effort})
+	if err != nil {
+		return true
+	}
+	_, err = compat.ParseReasoning(map[string]json.RawMessage{
+		"reasoning_effort": native,
+		"reasoning":        reasoning,
+	})
+	return err != nil
 }
 
 func mapMaxOutputTokens(fields map[string]json.RawMessage, chat map[string]json.RawMessage) error {

@@ -60,7 +60,7 @@ func TestResponsesAcceptsNullUnsupportedToolExtensions(t *testing.T) {
 }
 
 // Reasoning aliases are pass-through: conflicting values are the upstream's
-// verdict, so Parse accepts them and the mapped chat body keeps both fields.
+// verdict, so Parse accepts them and the mapped chat body keeps both values.
 func TestResponsesAcceptsConflictingReasoningAliases(t *testing.T) {
 	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning_effort":"low","reasoning":{"effort":"high"}}`))
 	if err != nil {
@@ -74,8 +74,134 @@ func TestResponsesAcceptsConflictingReasoningAliases(t *testing.T) {
 	if err := json.Unmarshal(body, &fields); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
+	if got := string(fields["reasoning_effort"]); got != `"low"` {
+		t.Fatalf("reasoning_effort = %s, want original native alias value", got)
+	}
+	if got := string(fields["reasoning"]); got != `{"effort":"high"}` {
+		t.Fatalf("reasoning = %s, want original conflicting alias value", got)
+	}
+}
+
+func TestResponsesMapsMatchingReasoningAliasesWithoutPreservingDuplicate(t *testing.T) {
+	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning_effort":"high","reasoning":{"effort":"high"}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
 	if got := string(fields["reasoning_effort"]); got != `"high"` {
-		t.Fatalf("reasoning_effort = %s, want the reasoning.effort mapping forwarded verbatim", got)
+		t.Fatalf("reasoning_effort = %s, want the shared alias value", got)
+	}
+	if _, ok := fields["reasoning"]; ok {
+		t.Fatal("matching effort-only reasoning alias was preserved as a duplicate reasoning field")
+	}
+}
+
+func TestResponsesPreservesReasoningObjectWithAdditionalMembers(t *testing.T) {
+	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning_effort":"low","reasoning":{"effort":"high","budget_tokens":8192,"summary":"auto"}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := string(fields["reasoning_effort"]); got != `"low"` {
+		t.Fatalf("reasoning_effort = %s, want original native alias value", got)
+	}
+	if got := string(fields["reasoning"]); got != `{"effort":"high","budget_tokens":8192,"summary":"auto"}` {
+		t.Fatalf("reasoning = %s, want complete original object", got)
+	}
+}
+
+func TestResponsesPreservesReasoningEffortAndBudgetObject(t *testing.T) {
+	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning":{"effort":"high","budget_tokens":8192}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := string(fields["reasoning"]); got != `{"effort":"high","budget_tokens":8192}` {
+		t.Fatalf("reasoning = %s, want complete reasoning object", got)
+	}
+	if _, ok := fields["reasoning_effort"]; ok {
+		t.Fatal("reasoning_effort was synthesized from an object with additional members")
+	}
+}
+
+func TestResponsesMapsReasoningObjectContainingOnlyEffort(t *testing.T) {
+	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning":{"effort":"high"}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := string(fields["reasoning_effort"]); got != `"high"` {
+		t.Fatalf("reasoning_effort = %s, want mapped effort", got)
+	}
+	if _, ok := fields["reasoning"]; ok {
+		t.Fatal("reasoning object was retained despite containing only effort")
+	}
+}
+
+func TestResponsesPassesExplicitOffReasoningValues(t *testing.T) {
+	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning_effort":"none","thinking":false}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := string(fields["reasoning_effort"]); got != `"none"` {
+		t.Fatalf("reasoning_effort = %s, want explicit off value", got)
+	}
+	if got := string(fields["thinking"]); got != `false` {
+		t.Fatalf("thinking = %s, want explicit false", got)
+	}
+}
+
+func TestResponsesMapsStandaloneReasoningString(t *testing.T) {
+	request, err := Parse([]byte(`{"model":"public-chat","input":"think","reasoning":"high"}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	body, err := request.MarshalFor(chatModel())
+	if err != nil {
+		t.Fatalf("MarshalFor: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := string(fields["reasoning_effort"]); got != `"high"` {
+		t.Fatalf("reasoning_effort = %s, want mapped standalone reasoning string", got)
 	}
 }
 

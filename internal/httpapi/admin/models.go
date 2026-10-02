@@ -208,6 +208,9 @@ func (h *Models) testCandidate(writer http.ResponseWriter, request *http.Request
 		defer func() { <-h.testSlots }()
 	case <-request.Context().Done():
 		return
+	default:
+		writeAdminError(writer, http.StatusTooManyRequests, "model_test_capacity", "Too many candidate model tests are already running.", nil)
+		return
 	}
 	started := time.Now()
 	err = h.service.TestCandidate(request.Context(), input.Provider, upstreamID)

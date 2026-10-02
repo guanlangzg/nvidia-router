@@ -45,10 +45,6 @@ func ReasoningMetadataFromBody(body []byte) (effectiveLevel string, requested bo
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
 		return "", false, ""
 	}
-	spec, err := compat.ParseReasoning(fields)
-	if err != nil {
-		return "", false, ""
-	}
 	names := make([]string, 0, len(reasoningWireFieldOrder))
 	for _, name := range reasoningWireFieldOrder {
 		if _, ok := fields[name]; ok {
@@ -59,6 +55,10 @@ func ReasoningMetadataFromBody(body []byte) (effectiveLevel string, requested bo
 		return "", false, ""
 	}
 	wireFields = strings.Join(names, ",")
+	spec, err := compat.ParseReasoning(fields)
+	if err != nil {
+		return "", true, wireFields
+	}
 	if spec.Requested && spec.Level != "" {
 		return string(spec.Level), true, wireFields
 	}

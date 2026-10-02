@@ -33,6 +33,25 @@ func TestReasoningFieldsFromBodyHandlesInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestReasoningMetadataFromBodyReportsFieldsWhenValuesAreInvalidOrConflict(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		fields string
+	}{
+		{"invalid effort", `{"reasoning_effort":42}`, "reasoning_effort"},
+		{"conflicting aliases", `{"reasoning_effort":"low","reasoning":{"effort":"high"}}`, "reasoning_effort,reasoning"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			level, requested, fields := ReasoningMetadataFromBody([]byte(tc.body))
+			if level != "" || !requested || fields != tc.fields {
+				t.Fatalf("ReasoningMetadataFromBody = level %q requested %v fields %q, want empty true %q", level, requested, fields, tc.fields)
+			}
+		})
+	}
+}
+
 func TestReasoningLevelFromBodyNormalizesAliases(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -67,7 +67,7 @@ func prepareModelRequest(ctx context.Context, request modelRequest, resolver Mod
 	effectiveReasoningLevel, reasoningRequested, wireFields := observability.ReasoningMetadataFromBody(body)
 	observability.SetReasoningLevels(ctx, requestedReasoningLevel, effectiveReasoningLevel)
 	observability.SetReasoningRequest(ctx, reasoningRequested, wireFields)
-	if request.ReasoningRequested() {
+	if reasoningRequested {
 		observability.SetReasoningSource(ctx, "client")
 	}
 

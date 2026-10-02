@@ -7,9 +7,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"nvidia-router/internal/runtimeconfig"
 )
 
 func TestHasValidToolCallsRequiresFunctionAndJSONArguments(t *testing.T) {
@@ -218,6 +221,65 @@ func TestCandidateProbesWithoutAWhitelistRow(t *testing.T) {
 	assertCandidateNotPersisted(t, db, "vendor/fresh-model")
 }
 
+func TestCandidateNVIDIAUsesFiveMinuteFirstByteTimeout(t *testing.T) {
+	service, _, secrets, discoverer := newCatalogTestService(t)
+	secrets.availableIDs = []int64{11}
+	discoverer.chatResponse = `{"choices":[{"message":{"content":"ok"}}]}`
+
+	if err := service.TestCandidate(context.Background(), ProviderNVIDIA, "vendor/fresh-slow-model"); err != nil {
+		t.Fatalf("TestCandidate: %v", err)
+	}
+	if len(discoverer.chatSnapshots) != 1 {
+		t.Fatalf("chat probe snapshots = %d, want 1", len(discoverer.chatSnapshots))
+	}
+	if got := discoverer.chatSnapshots[0].FirstByteTimeoutMS; got != int(maxModelVerificationTimeout/time.Millisecond) {
+		t.Fatalf("candidate first-byte timeout = %dms, want %dms", got, maxModelVerificationTimeout/time.Millisecond)
+	}
+}
+
+func TestCandidateNVIDIAOverallDeadlineBoundsKeyRotation(t *testing.T) {
+	service, _, secrets, discoverer := newCatalogTestService(t)
+	secrets.availableIDs = []int64{11, 12, 13}
+	discoverer.chatResponse = `{"choices":[{"message":{"content":"ok"}}]}`
+	discoverer.chatStatuses = []int{503, 200}
+	recorder := &candidateDeadlineDiscoverer{fakeDiscoverer: discoverer}
+	service.discoverer = recorder
+
+	started := time.Now()
+	if err := service.TestCandidate(context.Background(), ProviderNVIDIA, "vendor/slow-candidate"); err != nil {
+		t.Fatalf("TestCandidate: %v", err)
+	}
+	if len(secrets.usedKeyIDs) != 2 {
+		t.Fatalf("keys tried = %v, want two (one transient failure then success)", secrets.usedKeyIDs)
+	}
+	if len(recorder.deadlines) != 2 {
+		t.Fatalf("candidate call deadlines = %d, want 2", len(recorder.deadlines))
+	}
+	wantDeadline := started.Add(maxModelVerificationTimeout)
+	for i, deadline := range recorder.deadlines {
+		if deadline.Before(wantDeadline.Add(-time.Second)) || deadline.After(wantDeadline.Add(time.Second)) {
+			t.Errorf("call %d deadline = %s, want invocation deadline near %s", i, deadline, wantDeadline)
+		}
+		if !deadline.Equal(recorder.deadlines[0]) {
+			t.Errorf("call %d deadline = %s, want shared invocation deadline %s", i, deadline, recorder.deadlines[0])
+		}
+	}
+}
+
+type candidateDeadlineDiscoverer struct {
+	*fakeDiscoverer
+	deadlines []time.Time
+}
+
+func (d *candidateDeadlineDiscoverer) Chat(ctx context.Context, snapshot runtimeconfig.Snapshot, token string, body []byte, stream bool) (*http.Response, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return nil, errors.New("candidate probe context has no deadline")
+	}
+	d.deadlines = append(d.deadlines, deadline)
+	return d.fakeDiscoverer.Chat(ctx, snapshot, token, body, stream)
+}
+
 func TestCandidateReportsWhenNoNVIDIAKeyIsAvailable(t *testing.T) {
 	service, _, _, _ := newCatalogTestService(t)
 
@@ -347,6 +409,56 @@ func serviceRepositoryDB(t *testing.T, service *Service) *sql.DB {
 // A gateway that ignores tool_choice:"required" used to stay unknown forever
 // and deadlock every tools request behind 501. The auto fallback with an
 // explicit instruction is what rescues them.
+func TestDetailedProbeUsesProviderSpecificTokenBudgets(t *testing.T) {
+	for _, test := range []struct {
+		provider       string
+		wantProbeLimit int
+	}{
+		{provider: ProviderNVIDIA, wantProbeLimit: modelProbeMaxTokens},
+		{provider: ProviderOpenCodeFree, wantProbeLimit: ocfProbeMaxTokens},
+	} {
+		t.Run(test.provider, func(t *testing.T) {
+			service, db, secrets, discoverer := newCatalogTestService(t)
+			secrets.availableIDs = []int64{11}
+			publicID := "detailed-budget-" + test.provider
+			if err := service.SaveSelection(context.Background(), []Selection{{
+				PublicID: publicID, UpstreamID: "vendor/" + publicID, DisplayName: publicID,
+				Kind: KindChat, Provider: test.provider,
+			}}); err != nil {
+				t.Fatalf("SaveSelection: %v", err)
+			}
+			discoverer.chatResponse = `{"choices":[{"message":{"content":"ok"}}]}`
+
+			var probeBodies [][]byte
+			if test.provider == ProviderOpenCodeFree {
+				gateway := &fakeOpenCodeFreeGateway{chatResponse: discoverer.chatResponse}
+				service = service.WithOpenCodeFree(gateway)
+				if _, err := service.TestModelAutoDetailed(context.Background(), modelIDByPublicID(t, db, publicID)); err != nil {
+					t.Fatalf("TestModelAutoDetailed: %v", err)
+				}
+				probeBodies = gateway.chatBodies
+			} else {
+				if _, err := service.TestModelAutoDetailed(context.Background(), modelIDByPublicID(t, db, publicID)); err != nil {
+					t.Fatalf("TestModelAutoDetailed: %v", err)
+				}
+				probeBodies = discoverer.chatBodies
+			}
+			if len(probeBodies) != 4 {
+				t.Fatalf("detailed probe calls = %d, want 4 (base, reasoning, and two tools forms)", len(probeBodies))
+			}
+			for index, wantTokens := range []int{test.wantProbeLimit, test.wantProbeLimit, toolsProbeMaxTokens, toolsProbeMaxTokens} {
+				var payload map[string]any
+				if err := json.Unmarshal(probeBodies[index], &payload); err != nil {
+					t.Fatalf("decode probe call %d: %v", index, err)
+				}
+				if got := payload["max_tokens"]; got != float64(wantTokens) {
+					t.Errorf("probe call %d max_tokens = %v, want %d", index, got, wantTokens)
+				}
+			}
+		})
+	}
+}
+
 func TestToolsProbeTriesAutoFallbackWhenRequiredYieldsNoCalls(t *testing.T) {
 	service, discoverer, modelID := detailedProbeService(t, "tools-fallback")
 	discoverer.chatResponses = []string{

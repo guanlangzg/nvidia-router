@@ -277,7 +277,15 @@ func (s *Service) TestCandidate(ctx context.Context, provider, upstreamID string
 	if provider == "" {
 		provider = defaultModelProvider
 	}
-	return s.probeByProvider(ctx, Model{UpstreamID: upstreamID, Provider: provider, Kind: KindChat})
+	model := Model{UpstreamID: upstreamID, Provider: provider, Kind: KindChat}
+	if provider == ProviderNVIDIA {
+		candidateCtx, cancel := context.WithTimeout(ctx, maxModelVerificationTimeout)
+		defer cancel()
+		firstByteTimeoutMS := int(maxModelVerificationTimeout / time.Millisecond)
+		model.StreamFirstTokenTimeoutMS = &firstByteTimeoutMS
+		return s.probeByProvider(candidateCtx, model)
+	}
+	return s.probeByProvider(ctx, model)
 }
 
 func (s *Service) probeByProvider(ctx context.Context, model Model) error {
@@ -653,7 +661,7 @@ func (s *Service) SyncOpenCodeFreeModels(ctx context.Context) (int, error) {
 	gatewaySet := make(map[string]struct{}, len(gatewayIDs))
 	for _, id := range gatewayIDs {
 		trimmed := strings.TrimSpace(id)
-		if trimmed == "" {
+		if trimmed == "" || !isFreeModelID(trimmed) {
 			continue
 		}
 		gatewaySet[trimmed] = struct{}{}

@@ -234,6 +234,49 @@ func TestDiscoverCandidatesKeepsOnlyFreeOpenCodeFreeModels(t *testing.T) {
 	}
 }
 
+func TestSyncOpenCodeFreeModelsIgnoresNonFreeGatewayIDs(t *testing.T) {
+	service, _, _, _ := newCatalogTestService(t)
+	if err := service.SaveSelection(context.Background(), []Selection{
+		{PublicID: "opencodefree/current-free", UpstreamID: "current-free", DisplayName: "Current Free", Kind: KindChat, Provider: ProviderOpenCodeFree, Enabled: true},
+		{PublicID: "opencodefree/retired-nonfree", UpstreamID: "retired-nonfree", DisplayName: "Retired Non-Free", Kind: KindChat, Provider: ProviderOpenCodeFree, Enabled: true},
+	}); err != nil {
+		t.Fatalf("SaveSelection: %v", err)
+	}
+	gateway := &fakeOpenCodeFreeGateway{models: []string{"current-free", "retired-nonfree"}}
+	service = service.WithOpenCodeFree(gateway)
+
+	disabled, err := service.SyncOpenCodeFreeModels(context.Background())
+	if err != nil {
+		t.Fatalf("SyncOpenCodeFreeModels: %v", err)
+	}
+	if disabled != 1 {
+		t.Fatalf("disabled models = %d, want 1", disabled)
+	}
+	if model := modelByPublicID(t, service, "opencodefree/current-free"); !model.Enabled {
+		t.Fatal("enabled free model was disabled even though it remains in the gateway list")
+	}
+	if model := modelByPublicID(t, service, "opencodefree/retired-nonfree"); model.Enabled {
+		t.Fatal("previously enabled non-free model stayed enabled because it remains in the gateway list")
+	}
+}
+
+func TestSyncOpenCodeFreeModelsLeavesDatabaseUnchangedWhenGatewayFetchFails(t *testing.T) {
+	service, _, _, _ := newCatalogTestService(t)
+	if err := service.SaveSelection(context.Background(), []Selection{{
+		PublicID: "opencodefree/current-free", UpstreamID: "current-free", DisplayName: "Current Free", Kind: KindChat, Provider: ProviderOpenCodeFree, Enabled: true,
+	}}); err != nil {
+		t.Fatalf("SaveSelection: %v", err)
+	}
+	service = service.WithOpenCodeFree(&fakeOpenCodeFreeGateway{modelsErr: errors.New("gateway unavailable")})
+
+	if _, err := service.SyncOpenCodeFreeModels(context.Background()); err == nil {
+		t.Fatal("SyncOpenCodeFreeModels error = nil, want gateway fetch error")
+	}
+	if model := modelByPublicID(t, service, "opencodefree/current-free"); !model.Enabled {
+		t.Fatal("enabled model changed after gateway list fetch failed")
+	}
+}
+
 func TestWhitelistMapsPublicIDAndDisablesImmediately(t *testing.T) {
 	service, _, _, _ := newCatalogTestService(t)
 	selections := []Selection{

@@ -488,6 +488,37 @@ func TestModelCandidateTestEndpointRunsReadOnlyProbe(t *testing.T) {
 	}
 }
 
+func TestModelCandidateTestEndpointRejectsWhenCapacityIsFull(t *testing.T) {
+	service := &fakeModels{}
+	handler := NewModels(service, fakeCandidateKeys{}, &fakeStateSync{})
+	for range candidateTestMaxConcurrency {
+		handler.testSlots <- struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "/admin/api/models/candidates/test", strings.NewReader(`{"provider":"nvidia","upstream_id":"vendor/fresh"}`)).WithContext(ctx)
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("full-capacity request waited instead of returning immediately")
+	}
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), `"code":"model_test_capacity"`) {
+		t.Fatalf("capacity status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(service.candidateTested) != 0 {
+		t.Fatalf("probed = %v, want no candidate service call at full capacity", service.candidateTested)
+	}
+}
+
 func TestModelCandidateTestEndpointReportsFailureReason(t *testing.T) {
 	handler := NewModels(&fakeModels{candidateTestErr: modelcatalog.ErrNVIDIAKeyRequired}, fakeCandidateKeys{}, &fakeStateSync{})
 

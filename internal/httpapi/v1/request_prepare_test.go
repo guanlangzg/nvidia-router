@@ -90,6 +90,28 @@ func TestPrepareModelRequestSuccessPreservesResolveAndReasoningMetadata(t *testi
 	}
 }
 
+func TestPrepareModelRequestAttributesInvalidReasoningToClientFromFinalBody(t *testing.T) {
+	ctx, state := prepareContext()
+	request := &prepareRequestFake{
+		modelID: "public/model",
+		body:    []byte(`{"reasoning_effort":"bogus","reasoning":{"effort":"high"}}`),
+	}
+	model := modelcatalog.Model{ID: 42, PublicID: request.modelID, UpstreamID: "upstream/model", Kind: modelcatalog.KindChat, Enabled: true}
+	prepared, err := prepareModelRequest(ctx, request, prepareResolverFunc(func(context.Context, string, modelcatalog.Requirements) (modelcatalog.Model, error) {
+		return model, nil
+	}))
+	if err != nil {
+		t.Fatalf("prepareModelRequest: %v", err)
+	}
+	if prepared.ReasoningRequested != true || prepared.ReasoningWireFields != "reasoning_effort,reasoning" || prepared.RequestedReasoningLevel != "" || prepared.EffectiveReasoningLevel != "" {
+		t.Fatalf("prepared reasoning metadata = requested:%v fields:%q levels:%q/%q", prepared.ReasoningRequested, prepared.ReasoningWireFields, prepared.RequestedReasoningLevel, prepared.EffectiveReasoningLevel)
+	}
+	snapshot := state.Snapshot()
+	if !snapshot.ReasoningRequested || snapshot.ReasoningWireFields != "reasoning_effort,reasoning" || snapshot.ReasoningSource != "client" || snapshot.ReasoningRequestedLevel != "" || snapshot.ReasoningEffectiveLevel != "" {
+		t.Fatalf("reasoning observation = requested:%v fields:%q source:%q levels:%q/%q", snapshot.ReasoningRequested, snapshot.ReasoningWireFields, snapshot.ReasoningSource, snapshot.ReasoningRequestedLevel, snapshot.ReasoningEffectiveLevel)
+	}
+}
+
 func TestPrepareModelRequestResolveFailureRecordsCapabilityCodeAndSkipsMarshal(t *testing.T) {
 	ctx, state := prepareContext()
 	request := &prepareRequestFake{modelID: "public/model", stream: true, requested: "low", reasoning: true, body: []byte(`{}`)}
