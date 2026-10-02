@@ -107,7 +107,7 @@ git diff --check
 
 ## 8. 当前线上状态（最后核验：2026-10-02）
 
-- 源码：main@00c75d2（分支 `codex/optimize-executor-20260828`，含 4fca032/d54a2d5）。
+- 源码：运行版本为 `00c75d2`（分支 `codex/optimize-executor-20260828`，含 4fca032/d54a2d5）；其后 `eea3556` 只改文档与测试脚本，未重新发布。
 - Release：`/opt/nvidia-router-releases/20261002-ocf-provider-retry-00c75d2`。
 - 镜像：`nvidia-router:deploy-20261002-ocf-provider-retry-00c75d2`。
 - 回滚点：`20261002-ocf-tools-probe-4fca032` / `nvidia-router:deploy-20261002-ocf-tools-probe-4fca032`（再往前 `20261002-reasoning-probes-5f944db`）。
@@ -508,3 +508,4 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
   - 上游真值直连网关：`python scripts/test/remote_exec.py scripts/test/opencodefree_tools_probe_remote.py --arg MODELS=<逗号分隔上游ID>`（在网关容器内用路由器同一把 key，含复刻路由器探测形态的 case）。
   - 编程任务闭环：`... ocf_programming_probe_remote.py --arg MODE=<state|reprobe|chat|stream|responses|all> [--arg TOOLSET=standard] --stdin-env NVIDIA_ROUTER_ADMIN_PASSWORD`；`reprobe` 走 model-test-jobs 强制刷新能力判定，不必等周期探测。
   - 发布后只读验收：`scripts/test/post_deploy_accept_remote.py`（容器状态/版本/备份/健康/匿名 401/端口/错误签名）。CLI 无 `db verify`；app 运行时 `db backup` 会因进程锁失败，完整性只能靠部署期备份与 `/health/ready`（含 ping + VerifyMigrations）。
+  - `.gitignore` 里的 `".worktrees/"` 带字面引号，等于没生效，`git add -A` 会再次把嵌套 worktree 当普通目录纳入；已改为无引号写法。

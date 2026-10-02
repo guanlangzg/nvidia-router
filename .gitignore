@@ -50,4 +50,4 @@ __pycache__/
 !/internal/web/dist/
 !/internal/web/dist/index.html
 !/internal/web/dist/assets/
-".worktrees/"  
+.worktrees/
