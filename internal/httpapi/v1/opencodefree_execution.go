@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +22,9 @@ const openCodeFreeRetryDelay = 500 * time.Millisecond
 // component only decides whether an attempt can be replayed and closes every
 // upstream response it receives.
 type openCodeFreeExecution struct {
-	call func(context.Context, bool) (*http.Response, error)
-	wait func(context.Context) error
+	call      func(context.Context, bool) (*http.Response, error)
+	wait      func(context.Context) error
+	waitDelay func(context.Context, time.Duration) error
 }
 
 type openCodeFreeNonRetryable struct {
@@ -62,12 +64,30 @@ func (e openCodeFreeExecution) run(parent context.Context, stream bool, tracker 
 		}
 		response.Body = &openCodeFreeBody{ReadCloser: response.Body}
 
-		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			retry, mapped := classifyOpenCodeFreeStatus(response, attempt == 0)
+			if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+				retry, delay, mapped := classifyOpenCodeFreeStatus(response, attempt == 0)
+				_ = response.Body.Close()
+				cancel()
+				if retry && !tracker.wrote {
+					if err := e.waitForRetry(parent, delay); err != nil {
+						if parent.Err() != nil {
+							return nil
+						}
+						return err
+					}
+					continue
+				}
+				return mapped
+			}
+
+			callbackErr := callback(ctx, response)
 			_ = response.Body.Close()
 			cancel()
-			if retry && !tracker.wrote {
-				if err := e.waitForRetry(parent); err != nil {
+			if callbackErr == nil {
+				return nil
+			}
+			if attempt == 0 && !tracker.wrote && openCodeFreeRetryableCallbackError(callbackErr) {
+				if err := e.waitForRetry(parent, openCodeFreeRetryDelay); err != nil {
 					if parent.Err() != nil {
 						return nil
 					}
@@ -75,25 +95,7 @@ func (e openCodeFreeExecution) run(parent context.Context, stream bool, tracker 
 				}
 				continue
 			}
-			return mapped
-		}
-
-		callbackErr := callback(ctx, response)
-		_ = response.Body.Close()
-		cancel()
-		if callbackErr == nil {
-			return nil
-		}
-		if attempt == 0 && !tracker.wrote && openCodeFreeRetryableCallbackError(callbackErr) {
-			if err := e.waitForRetry(parent); err != nil {
-				if parent.Err() != nil {
-					return nil
-				}
-				return err
-			}
-			continue
-		}
-		return callbackErr
+			return callbackErr
 	}
 	return errors.New("OpenCodeFree execution exhausted retry budget")
 }
@@ -125,11 +127,17 @@ func (b *openCodeFreeBody) RequireSemanticCompletion() {
 	}
 }
 
-func (e openCodeFreeExecution) waitForRetry(ctx context.Context) error {
+func (e openCodeFreeExecution) waitForRetry(ctx context.Context, delay time.Duration) error {
+	if e.waitDelay != nil {
+		return e.waitDelay(ctx, delay)
+	}
 	if e.wait != nil {
 		return e.wait(ctx)
 	}
-	timer := time.NewTimer(openCodeFreeRetryDelay)
+	if delay <= 0 {
+		delay = openCodeFreeRetryDelay
+	}
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -137,6 +145,56 @@ func (e openCodeFreeExecution) waitForRetry(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func parseRetryAfter(header string) (time.Duration, bool) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseFloat(header, 64); err == nil {
+		if seconds <= 0 {
+			return 0, false
+		}
+		return time.Duration(seconds * float64(time.Second)), true
+	}
+	if parsedTime, err := http.ParseTime(header); err == nil {
+		delay := time.Until(parsedTime)
+		if delay <= 0 {
+			return 0, false
+		}
+		return delay, true
+	}
+	return 0, false
+}
+
+func isQuotaExhaustion(message string) bool {
+	lower := strings.ToLower(message)
+	for _, term := range []string{"insufficient_quota", "quota_exceeded", "exceeded your current quota", "out of credit", "billing"} {
+		if strings.Contains(lower, term) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRetryable429 reports whether a 429 status code is a retryable transient failure
+// (e.g. carrying Retry-After or indicating server-side unavailable/busy/capacity)
+// rather than a quota/credit exhaustion or standard concurrency cap.
+func isRetryable429(message string, hasRetryAfter bool) bool {
+	if isQuotaExhaustion(message) {
+		return false
+	}
+	if hasRetryAfter {
+		return true
+	}
+	lower := strings.ToLower(message)
+	for _, term := range []string{"endpoint is unavailable", "busy", "capacity"} {
+		if strings.Contains(lower, term) {
+			return true
+		}
+	}
+	return false
 }
 
 func openCodeFreeRetryableCallbackError(err error) bool {
@@ -151,7 +209,7 @@ func openCodeFreeRetryableCallbackError(err error) bool {
 	return classified.PublicCode == "upstream_empty_response" || classified.PublicCode == "upstream_protocol_error"
 }
 
-func classifyOpenCodeFreeStatus(response *http.Response, allowRetry bool) (bool, error) {
+func classifyOpenCodeFreeStatus(response *http.Response, allowRetry bool) (bool, time.Duration, error) {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
 	message := strings.TrimSpace(string(body))
 	if message == "" {
@@ -160,20 +218,28 @@ func classifyOpenCodeFreeStatus(response *http.Response, allowRetry bool) (bool,
 		message = message[:512]
 	}
 	if response.StatusCode == http.StatusNotFound {
-		return false, &apierror.Error{
+		return false, 0, &apierror.Error{
 			Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_model_not_found", Message: message,
 		}
 	}
 	if response.StatusCode == http.StatusTooManyRequests || isOpenCodeFreeTransientStatus(response.StatusCode) {
-		retry := allowRetry && response.StatusCode != http.StatusTooManyRequests
-		if retry {
-			return true, nil
+		delay, hasDelay := parseRetryAfter(response.Header.Get("Retry-After"))
+		if !hasDelay {
+			delay = openCodeFreeRetryDelay
+		}
+		retry := allowRetry
+		if response.StatusCode == http.StatusTooManyRequests {
+			retry = allowRetry && isRetryable429(message, hasDelay)
 		}
 		status := response.StatusCode
 		if status == http.StatusInternalServerError || status == 436 {
 			status = http.StatusBadGateway
 		}
-		return false, fault.New(status, fault.ScopeUpstreamGlobal, "server_error", "upstream_unavailable", message, nil)
+		mapped := fault.New(status, fault.ScopeUpstreamGlobal, "server_error", "upstream_unavailable", message, nil)
+		if retry {
+			return true, delay, mapped
+		}
+		return false, 0, mapped
 	}
 	mapped := &apierror.Error{
 		Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_error", Message: message,
@@ -185,9 +251,13 @@ func classifyOpenCodeFreeStatus(response *http.Response, allowRetry bool) (bool,
 	// wasted call and saves the loop; the verdict stays upstream_error because a
 	// genuinely rejected request must not read as retryable to the client.
 	if response.StatusCode == http.StatusBadRequest && isRelayedProviderError(message) {
-		return allowRetry, mapped
+		delay, hasDelay := parseRetryAfter(response.Header.Get("Retry-After"))
+		if !hasDelay {
+			delay = openCodeFreeRetryDelay
+		}
+		return allowRetry, delay, mapped
 	}
-	return false, mapped
+	return false, 0, mapped
 }
 
 // isRelayedProviderError reports whether an error body is the provider layer's
