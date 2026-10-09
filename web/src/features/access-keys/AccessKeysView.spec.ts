@@ -7,6 +7,11 @@ import AccessKeysView from './AccessKeysView.vue'
 import CreateAccessKeyDialog from './CreateAccessKeyDialog.vue'
 import type { AccessKeysResponse } from './types'
 
+vi.mock('vue-router', () => ({
+  useRoute: vi.fn(() => ({ query: {} })),
+  useRouter: vi.fn(() => ({ replace: vi.fn() })),
+}))
+
 vi.mock('./api', () => ({
   accessKeysApi: {
     list: vi.fn(),

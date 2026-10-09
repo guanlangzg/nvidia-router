@@ -237,11 +237,43 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 }
 
 func (c *Client) Chat(ctx context.Context, snapshot runtimeconfig.Snapshot, body []byte, stream bool) (*http.Response, error) {
-	response, err := c.do(ctx, snapshot, http.MethodPost, "/chat/completions", body, stream)
+	normalizedBody, err := normalizeChatBody(body)
+	if err != nil {
+		return nil, fmt.Errorf("normalize OpenCodeFree chat body: %w", err)
+	}
+	response, err := c.do(ctx, snapshot, http.MethodPost, "/chat/completions", normalizedBody, stream)
 	if err != nil {
 		return nil, fmt.Errorf("request OpenCodeFree chat: %w", err)
 	}
-	return response, nil
+	if stream {
+		return response, nil
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return response, nil
+	}
+	contentType := strings.ToLower(response.Header.Get("Content-Type"))
+	if !strings.Contains(contentType, "text/event-stream") {
+		return response, nil
+	}
+	defer func() { _ = response.Body.Close() }()
+	aggregatedJSON, err := aggregateSseCompletion(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: aggregate OpenCodeFree SSE: %v", ErrProtocol, err)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Proto:      response.Proto,
+		ProtoMajor: response.ProtoMajor,
+		ProtoMinor: response.ProtoMinor,
+		Header: http.Header{
+			"Content-Type":  []string{"application/json; charset=utf-8"},
+			"Cache-Control": []string{"no-store"},
+		},
+		Body:          io.NopCloser(bytes.NewReader(aggregatedJSON)),
+		ContentLength: int64(len(aggregatedJSON)),
+		Request:       response.Request,
+	}, nil
 }
 
 // do sends one gateway call, through the proxy pool when one is wired. A pooled
@@ -255,7 +287,7 @@ func (c *Client) do(ctx context.Context, snapshot runtimeconfig.Snapshot, method
 			ctx = WithSession(ctx, generated)
 		}
 	}
-	if c.local || c.proxy == nil || !c.proxy.Configured() {
+		if c.local || c.proxy == nil || !c.proxy.Configured() || strings.Contains(c.baseURL, "opencode.ai") {
 		request, err := c.newRequest(ctx, method, path, body, stream)
 		if err != nil {
 			return nil, err
@@ -334,7 +366,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body []byt
 		return nil, fmt.Errorf("create OpenCodeFree request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
-	if stream {
+	if stream || bytes.Contains(body, []byte(`"stream":true`)) {
 		request.Header.Set("Accept", "text/event-stream")
 	}
 	if body != nil {
@@ -354,6 +386,8 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body []byt
 	request.Header.Set("x-opencode-session", sessionID)
 	if c.authKey != "" {
 		request.Header.Set("Authorization", "Bearer "+c.authKey)
+	} else if strings.Contains(c.baseURL, "opencode.ai") {
+		request.Header.Set("Authorization", "Bearer public")
 	}
 	return request, nil
 }

@@ -509,3 +509,33 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
   - 编程任务闭环：`... ocf_programming_probe_remote.py --arg MODE=<state|reprobe|chat|stream|responses|all> [--arg TOOLSET=standard] --stdin-env NVIDIA_ROUTER_ADMIN_PASSWORD`；`reprobe` 走 model-test-jobs 强制刷新能力判定，不必等周期探测。
   - 发布后只读验收：`scripts/test/post_deploy_accept_remote.py`（容器状态/版本/备份/健康/匿名 401/端口/错误签名）。CLI 无 `db verify`；app 运行时 `db backup` 会因进程锁失败，完整性只能靠部署期备份与 `/health/ready`（含 ping + VerifyMigrations）。
   - `.gitignore` 里的 `".worktrees/"` 带字面引号，等于没生效，`git add -A` 会再次把嵌套 worktree 当普通目录纳入；已改为无引号写法。
+
+## 44. 2026-10-09 架构提纯：纯二进制原生部署、单端口 3756 与零容器收敛
+
+- **架构决策（用户强制指令）**：彻底取消国内测试机（hangzhou2-2）复杂 Docker 容器与虚拟网桥结构；对外有且仅管理 `3756` 单一端口。Docker 仅用于 GitHub CI 测试，严禁在远端 VPS 运行 `docker build` 耗尽资源。
+- **单端口管理与全栈自闭环**：
+  - 核心路由器 `nvidia-router` 直接以单体原生二进制运行在宿主机，唯一监听 `0.0.0.0:3756`；
+  - 辅助网关 `opencode-free-proxy` 已彻底从宿主机移除（`docker rm` 销毁容器，彻底关停 6020 端口）；
+  - OpenCodeFree 客户端指纹注入（`bash/glob/grep/read` 四件套）、Session ID 注入及逆向 SSE 流式聚合（针对非流式调用自动聚合为 chat.completion JSON）已全量原生内嵌于 Go 模块 `internal/upstream/opencodefree` 中，直连上游 `https://opencode.ai/zen/v1`；
+  - 全机公网仅暴露 3756 一个业务管理端口，0 业务容器，内存占用从数百兆大幅降低至 ~40MB，CPU 0%。
+- **极速部署链路（`scripts/deploy/deploy_native.py`）**：
+  - 本地执行交叉编译生成 14.5MB 静态二进制（内置前端 `go:embed`）；
+  - SFTP 上传覆盖 `/opt/nvidia-router/nvidia-router`；
+  - 宿主机配置 Systemd 守护进程 `/etc/systemd/system/nvidia-router.service`，执行 `systemctl restart nvidia-router`（0.1s 重启生效，支持开机自启）。
+	- **step-5-preview-free 能力解封与验证闭环**：
+	  - 修复 `internal/modelcatalog/capability_hints.go`：将 `step-` 前缀纳入推理与工具提示列表，默认赋予 `inferred` 能力状态；
+	  - 修复 `internal/modelcatalog/repository.go`：修复 `r.Patch` 的 SQL UPDATE 遗漏更新 `tools_status` 与 `tools_verified_at` 导致管理员 PATCH 工具能力不生效的陈年 Bug；
+	  - 真实长编程闭环实测（`ocf_programming_probe_remote.py`）：`step-5-preview-free`、`space-bunny-free` 在直连 `https://opencode.ai/zen/v1` 的原生架构下，在 `chat`、`stream`、`responses` 三协议下真实 Coding-agent 测试全量 `solved=true` 100% 达成，工具调用零 501 拦截。
+
+## 45. 2026-10-09 全量深度代码审查与核心性能/健壮性优化
+
+- **P0 逆向 SSE 聚合 Usage 逃逸修复**：`internal/upstream/opencodefree/aggregate.go` 的 `absorb` 对 `chunk.Usage` 使用 `bytes.Clone` 深拷贝，彻底杜绝 `bufio.Scanner` 缓冲区复用在后续帧（`data: [DONE]` 等）中污染覆盖 `usage` 导致反序列化畸变的风险；补充大流（32MB）上限防护 `maxAggregatePayloadBytes`。
+- **P1 代理 Transport 缓存读写锁解耦**：`internal/xkproxy/manager.go` 将 `clock` 与 `cachedTransport.lastUsed` 改为 `atomic.Uint64`；快路径（命中且代理未过期/健康）在 `RLock` 保护下原子更新时钟并直接返回 Handle，彻底消灭每个请求释放读锁后争抢独占写锁造成的 Lock Churn 性能瓶颈。
+- **P1 NVIDIA Base 探针 Token 预算调优**：`internal/modelcatalog/service.go` 将 `modelProbeMaxTokens` 从 16 提升至 128，解决 Nemotron 等具有长 chat 模板或 reasoning header 的大模型因 16 tokens 耗尽被误判为 empty response / unreachable 的陈年假阴性缺陷。
+- **P2 app.go 组装生命周期解耦**：将 `app.New` 中多线程 Worker（清理器、健康探针、OpenCodeFree 同步器等）解耦提取至 `startBackgroundWorkers`，提升装配内聚性。
+- **P3 前端测试夹具静音**：`AccessKeysView.spec.ts` 与 `NvidiaKeysView.spec.ts` 补充 `vue-router` mock，消除控制台未捕获的 router injection 警告。
+- **杭州服务器真实部署与双模式联调**：
+  - 重新编译 Linux 原生二进制并 SFTP 部署到国内主机（114.55.25.190），Systemd 重启生效；
+  - 3756 `/health/live` 与 `/health/ready` 返回 200；
+  - 真实 Coding-agent 编程测试（`ocf_programming_probe_remote.py`）：非流式（MODE=chat）与流式（MODE=stream）在 `space-bunny-free` 与 `step-5-preview-free` 上驱动 5-7 轮完整工具交互（list/read/write/run_tests）全部达成 `solved=true`（unittest 2 失败 -> 全部通过 OK），代码修改真实生效且参数 JSON 零畸变。
+

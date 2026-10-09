@@ -22,18 +22,16 @@ ssh -F .\ssh_config_local hangzhou2-2
 
 不得使用其他服务器目录或国外环境执行本项目部署和星空代理真实联调。部署前先检查远端服务、端口和数据库状态；每一步改动后必须验证健康检查、关键端口和业务接口。XApi 完整地址、provider 凭据、SSH 私钥及其他密钥只允许通过运行时 Secret 注入，不得写入 Git、规则文件、脚本、`memory.md`、日志或命令输出。
 
-## 镜像与发布版本管理（强制）
+## 架构与发布规范（2026-10-09 纯二进制单端口准则）
 
-- 每次构建和部署必须使用唯一、不可漂移的版本号，禁止生产使用 `latest`、`local`、`dev` 或其他无版本标签。
-- 版本号格式统一为 `YYYYMMDD-变更主题-git短SHA`；同日同主题重复发布时追加序号或时间后缀。例如：`20260823-redeploy-cfcaecf`。
-- 同一版本号必须同时用于：
-  - Git 源码对应的 `HEAD` 短 SHA；
-  - Release 目录 `/opt/nvidia-router-releases/<版本号>`；
-  - 镜像标签 `nvidia-router:deploy-<版本号>`；
-  - 部署记录中的回滚点和验证结果。
-- 标准发布必须调用 `scripts/deploy/deploy_remote.py <版本号>`，通过 `git archive HEAD` 打包；构建前核对 `HEAD` 与版本号中的短 SHA 一致。源码、数据库状态或配置发生变化时不得复用旧版本号。
-- Compose 生产覆盖文件必须通过 `NVIDIA_ROUTER_IMAGE` 注入版本化镜像；不得回退到 `nvidia-router:local`，不得用未版本化镜像启动或回滚。
-- 发布后必须检查容器实际镜像标签、Release 工作目录、Git SHA、数据库备份路径和健康验证结果；任务完成后将版本映射、备份位置、回滚版本和未完成验证项写入 `memory.md`。同一版本的 Release 已存在备份时不得覆盖，必须生成新版本号。
+- **测试与部署模式**：国内测试机（hangzhou2-2，`114.55.25.190`）**强制仅通过原生二进制部署与测试**；Docker 仅用于 GitHub CI 测试，严禁在远端 VPS 运行 `docker build` 避免挤占内存和 CPU 造成机器假死。
+- **单端口与全栈内聚（强制）**：
+  - 对外仅暴露且仅管理 `3756` 单一端口（HTTP 统一网关、Web 控制台与 Admin API 统一闭环）；
+  - OpenCodeFree 客户端指纹注入（bash/glob/grep/read）、会话生成与逆向流式聚合已完整原生实现于 Go 内部（`internal/upstream/opencodefree`），直连上游 `https://opencode.ai/zen/v1`；
+  - 彻底移除任何辅助网关与额外容器（无 6020，无 8080/18080），测试机上运行 0 个 Docker 容器。
+- **发布与持久化运维**：
+  - 本地执行 `python scripts/deploy/deploy_native.py`（秒级完成交叉编译、SFTP 覆盖与 Systemd 重启）；
+  - 宿主机使用 Systemd 持久化守护（`/etc/systemd/system/nvidia-router.service`），执行 `systemctl restart nvidia-router` 秒级生效，内存仅占用 ~40MB。
 
 ## 测试机信息
 
@@ -47,8 +45,8 @@ ssh -F .\ssh_config_local hangzhou2-2
 | 用户 | `root` |
 | 密码 | `REDACTED_CREDENTIAL` |
 | 端口 | 22 |
-| 用途 | 星空代理池真实联调、NVIDIA 路由器容器部署、真实联调 |
-| 环境 | Ubuntu 24.04 (kernel 6.8), Docker 29.1.5, Python 3.12, 无 Go（用 Docker 构建） |
+| 用途 | 星空代理池真实联调、NVIDIA 路由器原生二进制部署、真实联调 |
+| 环境 | Ubuntu 24.04 (kernel 6.8), Systemd 守护，对外仅暴露 3756 端口 |
 
 完整 XApi 地址和 provider 凭据只注入 `nvida反代` 运行时环境，不写入 Git、数据库、日志或文档。
 

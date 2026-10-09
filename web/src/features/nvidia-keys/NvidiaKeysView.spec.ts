@@ -7,6 +7,11 @@ import BatchImportDialog from './BatchImportDialog.vue'
 import NvidiaKeysView from './NvidiaKeysView.vue'
 import type { KeyTestResult, NVIDIAKey, NVIDIAKeysResponse, SingleImportResponse } from './types'
 
+vi.mock('vue-router', () => ({
+  useRoute: vi.fn(() => ({ query: {} })),
+  useRouter: vi.fn(() => ({ replace: vi.fn() })),
+}))
+
 vi.mock('./api', () => ({
   nvidiaKeysApi: {
     list: vi.fn(),
