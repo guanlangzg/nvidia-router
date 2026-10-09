@@ -102,7 +102,7 @@ func TestOpenCodeFreeChatRoutesToGatewayAndListsInModels(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		atomic.AddInt64(&hits, 1)
@@ -112,12 +112,12 @@ func TestOpenCodeFreeChatRoutesToGatewayAndListsInModels(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"id":"ocf-1","object":"chat.completion","model":"free-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello from opencodefree"},"finish_reason":"stop"}]}`)
+		_, _ = io.WriteString(w, `{"id":"ocf-1","object":"chat.completion","model":"model-free","choices":[{"index":0,"message":{"role":"assistant","content":"hello from opencodefree"},"finish_reason":"stop"}]}`)
 	}))
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 
@@ -182,7 +182,7 @@ func TestOpenCodeFreeChatStreamRoutesToGateway(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		atomic.AddInt64(&hits, 1)
@@ -206,7 +206,7 @@ func TestOpenCodeFreeChatStreamRoutesToGateway(t *testing.T) {
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 
@@ -235,7 +235,7 @@ func TestOpenCodeFreeUnconfiguredReturns503(t *testing.T) {
 	// No gateway configured: routing an OpenCodeFree model must be a clear 503,
 	// not an internal error or a hang.
 	application, accessToken := newOpenCodeFreeTestApp(t, "")
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 
@@ -260,7 +260,7 @@ func TestOpenCodeFreeRetriesTransient502(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		n := atomic.AddInt64(&calls, 1)
@@ -271,12 +271,12 @@ func TestOpenCodeFreeRetriesTransient502(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"id":"ocf-r","object":"chat.completion","model":"free-model","choices":[{"index":0,"message":{"role":"assistant","content":"retried ok"},"finish_reason":"stop"}]}`)
+		_, _ = io.WriteString(w, `{"id":"ocf-r","object":"chat.completion","model":"model-free","choices":[{"index":0,"message":{"role":"assistant","content":"retried ok"},"finish_reason":"stop"}]}`)
 	}))
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 
@@ -303,7 +303,7 @@ func TestOpenCodeFreeRetriesTransient436(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		if atomic.AddInt64(&calls, 1) == 1 {
@@ -313,12 +313,12 @@ func TestOpenCodeFreeRetriesTransient436(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"id":"ocf-436","object":"chat.completion","model":"free-model","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}`)
+		_, _ = io.WriteString(w, `{"id":"ocf-436","object":"chat.completion","model":"model-free","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}`)
 	}))
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	defer server.Close()
 
@@ -345,7 +345,7 @@ func TestOpenCodeFreeFinal436MapsToUnavailable(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		atomic.AddInt64(&calls, 1)
@@ -355,7 +355,7 @@ func TestOpenCodeFreeFinal436MapsToUnavailable(t *testing.T) {
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	defer server.Close()
 
@@ -382,7 +382,7 @@ func TestOpenCodeFreeRetriesMalformedSuccessResponse(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		if atomic.AddInt64(&calls, 1) == 1 {
@@ -393,12 +393,12 @@ func TestOpenCodeFreeRetriesMalformedSuccessResponse(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"id":"ocf-protocol-retry","object":"chat.completion","model":"free-model","choices":[{"index":0,"message":{"role":"assistant","content":"protocol retry ok"},"finish_reason":"stop"}]}`)
+		_, _ = io.WriteString(w, `{"id":"ocf-protocol-retry","object":"chat.completion","model":"model-free","choices":[{"index":0,"message":{"role":"assistant","content":"protocol retry ok"},"finish_reason":"stop"}]}`)
 	}))
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 
@@ -426,7 +426,7 @@ func TestOpenCodeFreeDoesNotRetry429(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		atomic.AddInt64(&calls, 1)
@@ -436,7 +436,7 @@ func TestOpenCodeFreeDoesNotRetry429(t *testing.T) {
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 
@@ -463,7 +463,7 @@ func TestOpenCodeFreePreservesRequestedReasoningEffort(t *testing.T) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"data":[{"id":"free-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-free"}]}`)
 			return
 		}
 		atomic.AddInt64(&calls, 1)
@@ -483,12 +483,12 @@ func TestOpenCodeFreePreservesRequestedReasoningEffort(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"id":"ocf-reasoning","object":"chat.completion","model":"free-model","choices":[{"index":0,"message":{"role":"assistant","content":"reasoning preserved"},"finish_reason":"stop"}]}`)
+		_, _ = io.WriteString(w, `{"id":"ocf-reasoning","object":"chat.completion","model":"model-free","choices":[{"index":0,"message":{"role":"assistant","content":"reasoning preserved"},"finish_reason":"stop"}]}`)
 	}))
 	defer gateway.Close()
 
 	application, accessToken := newOpenCodeFreeTestApp(t, gateway.URL)
-	seedChatModelWithProvider(t, application, "pub-free", "free-model", modelcatalog.ProviderOpenCodeFree)
+	seedChatModelWithProvider(t, application, "pub-free", "model-free", modelcatalog.ProviderOpenCodeFree)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 

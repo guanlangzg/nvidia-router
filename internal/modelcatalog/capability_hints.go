@@ -34,10 +34,10 @@ func openCodeFreeCapabilityHint(modelID string) openCodeFreeHint {
 	// Modern reasoning families exposed by the gateway share the OpenAI-style
 	// effort field at the gateway boundary. Closed models may hide the reasoning
 	// text, but accepting the effort parameter is still useful for Codex callers.
-	for _, prefix := range []string{
-		"deepseek-", "glm-", "minimax-", "kimi-", "qwen3.",
-		"gemini-3", "gpt-5", "grok-4",
-	} {
+		for _, prefix := range []string{
+			"deepseek-", "glm-", "minimax-", "kimi-", "qwen3.",
+			"gemini-3", "gpt-5", "grok-4", "step-",
+		} {
 		if strings.HasPrefix(id, prefix) {
 			return openCodeFreeHint{
 				SupportsTools:     true,

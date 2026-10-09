@@ -150,7 +150,35 @@ func TestPrepareModelRequestMarshalFailureSkipsProviderAndEffectiveReasoning(t *
 		t.Fatal("MarshalForWithOptions was not called")
 	}
 	snapshot := state.Snapshot()
-	if snapshot.ReasoningEffectiveLevel != "" || snapshot.ReasoningRequested {
-		t.Fatalf("reasoning observation after marshal failure = requested:%v effective:%q", snapshot.ReasoningRequested, snapshot.ReasoningEffectiveLevel)
+		if snapshot.ReasoningEffectiveLevel != "" || snapshot.ReasoningRequested {
+			t.Fatalf("reasoning observation after marshal failure = requested:%v effective:%q", snapshot.ReasoningRequested, snapshot.ReasoningEffectiveLevel)
+		}
+	}
+
+func TestPrepareModelRequestPreservesNVIDIAMaxTokensAndBodyUnmutated(t *testing.T) {
+	ctx, _ := prepareContext()
+	// An NVIDIA channel request with explicit small max_tokens (e.g. 100 for classification)
+	originalBody := []byte(`{"model":"meta/llama-3.1-70b-instruct","messages":[{"role":"user","content":"classify"}],"max_tokens":100}`)
+	request := &prepareRequestFake{
+		modelID: "nvidia/llama-3.1-70b-instruct",
+		body:    originalBody,
+	}
+	model := modelcatalog.Model{
+		ID:         77,
+		PublicID:   request.modelID,
+		UpstreamID: "meta/llama-3.1-70b-instruct",
+		Kind:       modelcatalog.KindChat,
+		Provider:   modelcatalog.ProviderNVIDIA,
+		Enabled:    true,
+	}
+	prepared, err := prepareModelRequest(ctx, request, prepareResolverFunc(func(context.Context, string, modelcatalog.Requirements) (modelcatalog.Model, error) {
+		return model, nil
+	}))
+	if err != nil {
+		t.Fatalf("prepareModelRequest: %v", err)
+	}
+	// Assert 100% byte-for-byte fidelity: max_tokens must NOT be mutated or forced to 512
+	if string(prepared.Body) != string(originalBody) {
+		t.Fatalf("prepared.Body was mutated = %s, want original %s", string(prepared.Body), string(originalBody))
 	}
 }

@@ -108,10 +108,20 @@ def emit(kind, **fields):
 
 
 def main():
-    key = subprocess.run(
-        ["docker", "exec", APP, "printenv", "NVIDIA_ROUTER_OPENCODEFREE_AUTH_KEY"],
-        capture_output=True, text=True, timeout=60,
-    ).stdout.strip()
+    key = ""
+    try:
+        with open("/opt/nvidia-router/.env", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("NVIDIA_ROUTER_OPENCODEFREE_AUTH_KEY="):
+                    key = line.split("=", 1)[1].strip()
+                    break
+    except Exception:
+        pass
+    if not key:
+        key = subprocess.run(
+            ["docker", "exec", APP, "printenv", "NVIDIA_ROUTER_OPENCODEFREE_AUTH_KEY"],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
     if not key:
         emit("meta", step="key", present=False)
         return 1

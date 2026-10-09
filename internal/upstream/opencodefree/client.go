@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,113 @@ const (
 	// spans roughly two cycles.
 	proxyWaitBudget = 10 * time.Second
 )
+
+const (
+	// DefaultUserAgent is the standard User-Agent header expected by OpenCodeFree upstreams.
+	DefaultUserAgent = "opencode/1.18.31"
+	// UserAgentEnvVar allows overriding DefaultUserAgent via environment variable.
+	UserAgentEnvVar = "OPENCODE_USER_AGENT"
+	base62Alphabet  = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
+
+type sessionCtxKey struct{}
+type userAgentCtxKey struct{}
+
+// WithSession associates an OpenCodeFree session ID with the context for session affinity.
+func WithSession(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionCtxKey{}, sessionID)
+}
+
+// SessionFrom retrieves the session ID stored in the context, if present.
+func SessionFrom(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	val, ok := ctx.Value(sessionCtxKey{}).(string)
+	return val, ok
+}
+
+// WithUserAgent associates a custom User-Agent with the context.
+func WithUserAgent(ctx context.Context, userAgent string) context.Context {
+	return context.WithValue(ctx, userAgentCtxKey{}, userAgent)
+}
+
+// UserAgentFrom retrieves the custom User-Agent from context, if present.
+func UserAgentFrom(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	val, ok := ctx.Value(userAgentCtxKey{}).(string)
+	return val, ok
+}
+
+// WithForwardedHeaders extracts valid x-opencode-session and User-Agent from headers
+// into the context.
+func WithForwardedHeaders(ctx context.Context, headers http.Header) context.Context {
+	if headers == nil {
+		return ctx
+	}
+	if session := strings.TrimSpace(headers.Get("x-opencode-session")); IsValidSessionID(session) {
+		ctx = WithSession(ctx, session)
+	}
+	if ua := strings.TrimSpace(headers.Get("User-Agent")); ua != "" {
+		ctx = WithUserAgent(ctx, ua)
+	}
+	return ctx
+}
+
+// IsValidSessionID verifies whether a session ID strictly matches ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$ (30 chars).
+func IsValidSessionID(id string) bool {
+	if len(id) != 30 || !strings.HasPrefix(id, "ses_") {
+		return false
+	}
+	for i := 4; i < 16; i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	for i := 16; i < 30; i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// GenerateSessionID generates a collision-resistant 30-char session ID.
+func GenerateSessionID() (string, error) {
+	var hexBytes [6]byte
+	if _, err := rand.Read(hexBytes[:]); err != nil {
+		return "", fmt.Errorf("generate session hex: %w", err)
+	}
+	var b62Result [14]byte
+	var randomByte [1]byte
+	for i := 0; i < 14; {
+		if _, err := rand.Read(randomByte[:]); err != nil {
+			return "", fmt.Errorf("generate session base62: %w", err)
+		}
+		// 62 * 4 = 248. Reject >= 248 for unbiased uniform sampling across 62 symbols.
+		if randomByte[0] < 248 {
+			b62Result[i] = base62Alphabet[randomByte[0]%62]
+			i++
+		}
+	}
+	return fmt.Sprintf("ses_%s%s", hex.EncodeToString(hexBytes[:]), string(b62Result[:])), nil
+}
+
+func resolveUserAgent(ctx context.Context) string {
+	if override := strings.TrimSpace(os.Getenv(UserAgentEnvVar)); override != "" {
+		return override
+	}
+	if ctx != nil {
+		if forwardedUA, ok := UserAgentFrom(ctx); ok && strings.HasPrefix(forwardedUA, "opencode/") {
+			return forwardedUA
+		}
+	}
+	return DefaultUserAgent
+}
 
 var ErrProtocol = errors.New("OpenCodeFree protocol error")
 
@@ -129,11 +237,43 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 }
 
 func (c *Client) Chat(ctx context.Context, snapshot runtimeconfig.Snapshot, body []byte, stream bool) (*http.Response, error) {
-	response, err := c.do(ctx, snapshot, http.MethodPost, "/chat/completions", body, stream)
+	normalizedBody, err := normalizeChatBody(body)
+	if err != nil {
+		return nil, fmt.Errorf("normalize OpenCodeFree chat body: %w", err)
+	}
+	response, err := c.do(ctx, snapshot, http.MethodPost, "/chat/completions", normalizedBody, stream)
 	if err != nil {
 		return nil, fmt.Errorf("request OpenCodeFree chat: %w", err)
 	}
-	return response, nil
+	if stream {
+		return response, nil
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return response, nil
+	}
+	contentType := strings.ToLower(response.Header.Get("Content-Type"))
+	if !strings.Contains(contentType, "text/event-stream") {
+		return response, nil
+	}
+	defer func() { _ = response.Body.Close() }()
+	aggregatedJSON, err := aggregateSseCompletion(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: aggregate OpenCodeFree SSE: %v", ErrProtocol, err)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Proto:      response.Proto,
+		ProtoMajor: response.ProtoMajor,
+		ProtoMinor: response.ProtoMinor,
+		Header: http.Header{
+			"Content-Type":  []string{"application/json; charset=utf-8"},
+			"Cache-Control": []string{"no-store"},
+		},
+		Body:          io.NopCloser(bytes.NewReader(aggregatedJSON)),
+		ContentLength: int64(len(aggregatedJSON)),
+		Request:       response.Request,
+	}, nil
 }
 
 // do sends one gateway call, through the proxy pool when one is wired. A pooled
@@ -142,7 +282,12 @@ func (c *Client) Chat(ctx context.Context, snapshot runtimeconfig.Snapshot, body
 // that already reached the gateway is never replayed: the gateway may have
 // accepted it and a second copy would double the call.
 func (c *Client) do(ctx context.Context, snapshot runtimeconfig.Snapshot, method, path string, body []byte, stream bool) (*http.Response, error) {
-	if c.local || c.proxy == nil || !c.proxy.Configured() {
+	if sessionID, ok := SessionFrom(ctx); !ok || !IsValidSessionID(sessionID) {
+		if generated, err := GenerateSessionID(); err == nil {
+			ctx = WithSession(ctx, generated)
+		}
+	}
+		if c.local || c.proxy == nil || !c.proxy.Configured() || strings.Contains(c.baseURL, "opencode.ai") {
 		request, err := c.newRequest(ctx, method, path, body, stream)
 		if err != nil {
 			return nil, err
@@ -221,7 +366,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body []byt
 		return nil, fmt.Errorf("create OpenCodeFree request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
-	if stream {
+	if stream || bytes.Contains(body, []byte(`"stream":true`)) {
 		request.Header.Set("Accept", "text/event-stream")
 	}
 	if body != nil {
@@ -229,8 +374,20 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body []byt
 		request.ContentLength = int64(len(body))
 	}
 	request.Header.Set("x-opencode-client", "desktop")
+	request.Header.Set("User-Agent", resolveUserAgent(ctx))
+	sessionID, ok := SessionFrom(ctx)
+	if !ok || !IsValidSessionID(sessionID) {
+		generated, err := GenerateSessionID()
+		if err != nil {
+			return nil, fmt.Errorf("generate OpenCodeFree session ID: %w", err)
+		}
+		sessionID = generated
+	}
+	request.Header.Set("x-opencode-session", sessionID)
 	if c.authKey != "" {
 		request.Header.Set("Authorization", "Bearer "+c.authKey)
+	} else if strings.Contains(c.baseURL, "opencode.ai") {
+		request.Header.Set("Authorization", "Bearer public")
 	}
 	return request, nil
 }

@@ -66,7 +66,14 @@ def main() -> int:
     )
     secret = ""
     if args.stdin_env:
-        secret = os.environ.get(args.stdin_env, "")
+        env_file = Path(__file__).resolve().parents[2] / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                if line.startswith(f"{args.stdin_env}="):
+                    secret = line.split("=", 1)[1].strip()
+                    break
+        if not secret:
+            secret = os.environ.get(args.stdin_env, "")
         if not secret:
             raise SystemExit("%s is required" % args.stdin_env)
     client = connect(args.ssh_config, args.host_alias)
