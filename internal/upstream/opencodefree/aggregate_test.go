@@ -116,31 +116,31 @@ data: [DONE]
 	if tc.Function.Arguments != `{"path":"calc.py"}` {
 		t.Errorf("tool_call arguments = %q, want %q", tc.Function.Arguments, `{"path":"calc.py"}`)
 	}
-		if parsed.Choices[0].FinishReason != "tool_calls" {
-			t.Errorf("finish_reason = %q, want tool_calls", parsed.Choices[0].FinishReason)
-		}
+	if parsed.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", parsed.Choices[0].FinishReason)
+	}
+}
+
+func TestAggregateSseCompletionUsageMemoryIsolation(t *testing.T) {
+	// Verify that scanner buffer reuse in subsequent frames cannot corrupt usage data
+	sseData := "data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n" +
+		"data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"content\":\"!\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	result, err := aggregateSseCompletion(strings.NewReader(sseData))
+	if err != nil {
+		t.Fatalf("aggregateSseCompletion failed: %v", err)
 	}
 
-	func TestAggregateSseCompletionUsageMemoryIsolation(t *testing.T) {
-		// Verify that scanner buffer reuse in subsequent frames cannot corrupt usage data
-		sseData := "data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n" +
-			"data: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"content\":\"!\"}}]}\n\n" +
-			"data: [DONE]\n\n"
-
-		result, err := aggregateSseCompletion(strings.NewReader(sseData))
-		if err != nil {
-			t.Fatalf("aggregateSseCompletion failed: %v", err)
-		}
-
-		var parsed struct {
-			Usage struct {
-				TotalTokens int `json:"total_tokens"`
-			} `json:"usage"`
-		}
-		if err := json.Unmarshal(result, &parsed); err != nil {
-			t.Fatalf("unmarshal aggregate output: %v", err)
-		}
-		if parsed.Usage.TotalTokens != 15 {
-			t.Errorf("total_tokens = %d, want 15", parsed.Usage.TotalTokens)
-		}
+	var parsed struct {
+		Usage struct {
+			TotalTokens int `json:"total_tokens"`
+		} `json:"usage"`
 	}
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal aggregate output: %v", err)
+	}
+	if parsed.Usage.TotalTokens != 15 {
+		t.Errorf("total_tokens = %d, want 15", parsed.Usage.TotalTokens)
+	}
+}

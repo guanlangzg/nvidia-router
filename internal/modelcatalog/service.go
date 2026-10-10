@@ -59,7 +59,7 @@ const (
 	// modelProbeMaxTokens bounds base probes. Modern reasoning/instruction models
 	// spend output tokens on chat-template prefixes and initial reasoning tokens
 	// before visible content; 128 provides a safe buffer against empty-response false negatives.
-	modelProbeMaxTokens         = 128
+	modelProbeMaxTokens = 128
 	// ocfProbeMaxTokens bounds the OpenCodeFree base probes. Gateway models spend
 	// output tokens on invisible chat-template markers before any visible text
 	// (observed: a 16-token window on mimo-v2.5-free returned 200 with empty

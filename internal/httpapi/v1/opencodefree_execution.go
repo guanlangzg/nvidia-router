@@ -67,30 +67,12 @@ func (e openCodeFreeExecution) run(parent context.Context, stream bool, tracker 
 		}
 		response.Body = &openCodeFreeBody{ReadCloser: response.Body}
 
-			if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-				retry, delay, mapped := classifyOpenCodeFreeStatus(response, attempt == 0)
-				_ = response.Body.Close()
-				cancel()
-				if retry && !tracker.wrote {
-					if err := e.waitForRetry(parent, delay); err != nil {
-						if parent.Err() != nil {
-							return nil
-						}
-						return err
-					}
-					continue
-				}
-				return mapped
-			}
-
-			callbackErr := callback(ctx, response)
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			retry, delay, mapped := classifyOpenCodeFreeStatus(response, attempt == 0)
 			_ = response.Body.Close()
 			cancel()
-			if callbackErr == nil {
-				return nil
-			}
-			if attempt == 0 && !tracker.wrote && openCodeFreeRetryableCallbackError(callbackErr) {
-				if err := e.waitForRetry(parent, openCodeFreeRetryDelay); err != nil {
+			if retry && !tracker.wrote {
+				if err := e.waitForRetry(parent, delay); err != nil {
 					if parent.Err() != nil {
 						return nil
 					}
@@ -98,7 +80,25 @@ func (e openCodeFreeExecution) run(parent context.Context, stream bool, tracker 
 				}
 				continue
 			}
-			return callbackErr
+			return mapped
+		}
+
+		callbackErr := callback(ctx, response)
+		_ = response.Body.Close()
+		cancel()
+		if callbackErr == nil {
+			return nil
+		}
+		if attempt == 0 && !tracker.wrote && openCodeFreeRetryableCallbackError(callbackErr) {
+			if err := e.waitForRetry(parent, openCodeFreeRetryDelay); err != nil {
+				if parent.Err() != nil {
+					return nil
+				}
+				return err
+			}
+			continue
+		}
+		return callbackErr
 	}
 	return errors.New("OpenCodeFree execution exhausted retry budget")
 }

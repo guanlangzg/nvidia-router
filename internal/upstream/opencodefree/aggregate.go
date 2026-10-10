@@ -25,15 +25,15 @@ type sseChunk struct {
 }
 
 type sseChunkChoice struct {
-	Index        int             `json:"index"`
-	Delta        sseChunkDelta   `json:"delta"`
-	FinishReason *string         `json:"finish_reason"`
+	Index        int           `json:"index"`
+	Delta        sseChunkDelta `json:"delta"`
+	FinishReason *string       `json:"finish_reason"`
 }
 
 type sseChunkDelta struct {
-	Role             string             `json:"role"`
-	Content          string             `json:"content"`
-	ReasoningContent string             `json:"reasoning_content"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content"`
 	// Upstreams in this family are inconsistent about the thinking field name:
 	// the stream can carry "reasoning" or "thinking" for content the protocol
 	// layer already treats as equivalent aliases. Reading only reasoning_content
@@ -96,9 +96,9 @@ func (agg *sseAggregate) absorb(data []byte) {
 	if agg.model == "" && chunk.Model != "" {
 		agg.model = chunk.Model
 	}
-		if len(chunk.Usage) > 0 && string(chunk.Usage) != "null" {
-			agg.usage = bytes.Clone(chunk.Usage)
-		}
+	if len(chunk.Usage) > 0 && string(chunk.Usage) != "null" {
+		agg.usage = bytes.Clone(chunk.Usage)
+	}
 	for _, choice := range chunk.Choices {
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			agg.finishReason = *choice.FinishReason
