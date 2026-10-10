@@ -38,8 +38,6 @@ func (e openCodeFreeNonRetryable) Error() string { return e.err.Error() }
 
 func (e openCodeFreeNonRetryable) Unwrap() error { return e.err }
 
-func (e openCodeFreeNonRetryable) noOpenCodeFreeRetry() {}
-
 // run makes at most one replay. A status or callback fault is returned to the
 // adapter so it can preserve the existing public error mapping. The callback
 // receives the per-attempt context and must write successful output through the
