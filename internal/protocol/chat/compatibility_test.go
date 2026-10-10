@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"nvidia-router/internal/apierror"
 	"nvidia-router/internal/modelcatalog"
 )
 
@@ -100,14 +99,6 @@ func TestMarshalForNormalizesLegacyFunctionCallAndToolResult(t *testing.T) {
 	if fields.Messages[1].Role != "tool" || fields.Messages[1].ToolCallID != fields.Messages[0].ToolCalls[0].ID || fields.Messages[1].Content != "sunny\n\n[image omitted: unsupported by upstream]\n\n{\"type\":\"future_part\",\"value\":1}" {
 		t.Fatalf("tool result = %#v", fields.Messages[1])
 	}
-}
-
-func containsChatError(err error, code, param string) bool {
-	public, ok := err.(*apierror.Error)
-	if !ok || public.Code != code || public.Param == nil || *public.Param != param {
-		return false
-	}
-	return true
 }
 
 // The fast path returns the original bytes verbatim. Parse rewrites legacy

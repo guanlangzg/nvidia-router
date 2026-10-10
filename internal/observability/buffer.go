@@ -385,12 +385,13 @@ func resetTimer(timer *time.Timer, delay time.Duration) {
 // shutdown; ctx carries the drain timeout so a stuck DB cannot wedge exit.
 func (b *BufferRecorder) drain(ctx context.Context, pending []RequestRecord) {
 	for {
+	drainLoop:
 		for len(pending) < b.batchSize {
 			select {
 			case record := <-b.records:
 				pending = append(pending, record)
 			default:
-				break
+				break drainLoop
 			}
 			if len(pending) >= b.batchSize {
 				break

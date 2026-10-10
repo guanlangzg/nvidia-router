@@ -150,10 +150,10 @@ func TestPrepareModelRequestMarshalFailureSkipsProviderAndEffectiveReasoning(t *
 		t.Fatal("MarshalForWithOptions was not called")
 	}
 	snapshot := state.Snapshot()
-		if snapshot.ReasoningEffectiveLevel != "" || snapshot.ReasoningRequested {
-			t.Fatalf("reasoning observation after marshal failure = requested:%v effective:%q", snapshot.ReasoningRequested, snapshot.ReasoningEffectiveLevel)
-		}
+	if snapshot.ReasoningEffectiveLevel != "" || snapshot.ReasoningRequested {
+		t.Fatalf("reasoning observation after marshal failure = requested:%v effective:%q", snapshot.ReasoningRequested, snapshot.ReasoningEffectiveLevel)
 	}
+}
 
 func TestPrepareModelRequestPreservesNVIDIAMaxTokensAndBodyUnmutated(t *testing.T) {
 	ctx, _ := prepareContext()

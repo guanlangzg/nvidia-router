@@ -291,80 +291,80 @@ func New(ctx context.Context, dependencies Dependencies) (*App, error) {
 		adminSecurity, adminManagement, adminapi.NewSettings(settings), adminapi.NewRuntime(keyPool), frontend,
 		statsHandler, monitoringHandler, metricsHandler, adminapi.NewEventStream(eventHub),
 	))
-		app.handler = httpapi.RecoverMiddleware(resolved.Logger, shutdownMiddleware(app.shutting.Load, router))
-		app.Server = NewServer(resolved.Config.ListenAddress, app.handler, settings, func() { app.beginShutdown(0) })
-		app.Server.setRootContext(rootCtx)
+	app.handler = httpapi.RecoverMiddleware(resolved.Logger, shutdownMiddleware(app.shutting.Load, router))
+	app.Server = NewServer(resolved.Config.ListenAddress, app.handler, settings, func() { app.beginShutdown(0) })
+	app.Server.setRootContext(rootCtx)
 
-		app.startBackgroundWorkers(rootCtx, cleanupCtx, recorderCtx, healthCtx, settings, models, modelHealth, observabilityRepository, adminRepository, resolved)
+	app.startBackgroundWorkers(rootCtx, cleanupCtx, recorderCtx, healthCtx, settings, models, modelHealth, observabilityRepository, adminRepository, resolved)
 
-		lockTransferred = true
-		return app, nil
+	lockTransferred = true
+	return app, nil
+}
+
+func (a *App) startBackgroundWorkers(
+	rootCtx, cleanupCtx, recorderCtx, healthCtx context.Context,
+	settings *runtimeconfig.Store,
+	models *modelcatalog.Service,
+	modelHealth *modelhealth.Service,
+	observabilityRepository *observability.Repository,
+	adminRepository *adminauth.Repository,
+	resolved Dependencies,
+) {
+	observabilityWorker := observability.NewCleanupWorker(observabilityRepository, resolved.Clock, resolved.Logger, settings)
+	adminSessionWorker := adminauth.NewSessionCleanupWorker(adminRepository, resolved.Clock, resolved.Logger)
+	var cleanupWorkers sync.WaitGroup
+	cleanupWorkers.Add(2)
+	go func() {
+		defer cleanupWorkers.Done()
+		observabilityWorker.Run(cleanupCtx)
+	}()
+	go func() {
+		defer cleanupWorkers.Done()
+		adminSessionWorker.Run(cleanupCtx)
+	}()
+	go func() {
+		cleanupWorkers.Wait()
+		close(a.cleanupDone)
+	}()
+	// Flusher pairs with the buffer recorder: it must outlive request serving
+	// long enough to drain the in-memory queue, so it gets its own ctx that
+	// shutdown.go cancels right before closing the DB.
+	go func() {
+		defer close(a.recorderDone)
+		a.requestRecorder.Run(recorderCtx)
+	}()
+	// Health checker pairs with the request path: it independently probes
+	// unhealthy keys and recovers valid ones so a user request doesn't pay the
+	// first failure after a key recovers from cooldown.
+	go func() {
+		defer close(a.healthDone)
+		a.healthChecker.Run(healthCtx)
+	}()
+	// Periodic OpenCodeFree catalog sync: keeps the enabled free list aligned
+	// with the gateway's live /models so a 6-model outage (2026-08-19) cannot
+	// recur without operator intervention. No-op when the gateway is unconfigured.
+	models.StartOpenCodeFreeSync(rootCtx, time.Hour)
+	// Startup capability-metadata check: a reasoning model whose profile cannot
+	// express any level (e.g. levels=[none] with zero_allowed=false) answers 501
+	// to every effort request. Log the offenders so the operator can PATCH them;
+	// nothing is auto-written (2026-08-25 llama incident).
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if broken, ids, err := models.CountUnexpressibleReasoningProfiles(checkCtx); err != nil {
+		resolved.Logger.Warn("reasoning profile consistency check failed", "error", err)
+	} else if broken > 0 {
+		resolved.Logger.Warn("reasoning models with unexpressible profiles found",
+			"count", broken, "public_ids", strings.Join(ids, ","))
 	}
-
-	func (a *App) startBackgroundWorkers(
-		rootCtx, cleanupCtx, recorderCtx, healthCtx context.Context,
-		settings *runtimeconfig.Store,
-		models *modelcatalog.Service,
-		modelHealth *modelhealth.Service,
-		observabilityRepository *observability.Repository,
-		adminRepository *adminauth.Repository,
-		resolved Dependencies,
-	) {
-		observabilityWorker := observability.NewCleanupWorker(observabilityRepository, resolved.Clock, resolved.Logger, settings)
-		adminSessionWorker := adminauth.NewSessionCleanupWorker(adminRepository, resolved.Clock, resolved.Logger)
-		var cleanupWorkers sync.WaitGroup
-		cleanupWorkers.Add(2)
-		go func() {
-			defer cleanupWorkers.Done()
-			observabilityWorker.Run(cleanupCtx)
-		}()
-		go func() {
-			defer cleanupWorkers.Done()
-			adminSessionWorker.Run(cleanupCtx)
-		}()
-		go func() {
-			cleanupWorkers.Wait()
-			close(a.cleanupDone)
-		}()
-		// Flusher pairs with the buffer recorder: it must outlive request serving
-		// long enough to drain the in-memory queue, so it gets its own ctx that
-		// shutdown.go cancels right before closing the DB.
-		go func() {
-			defer close(a.recorderDone)
-			a.requestRecorder.Run(recorderCtx)
-		}()
-		// Health checker pairs with the request path: it independently probes
-		// unhealthy keys and recovers valid ones so a user request doesn't pay the
-		// first failure after a key recovers from cooldown.
-		go func() {
-			defer close(a.healthDone)
-			a.healthChecker.Run(healthCtx)
-		}()
-		// Periodic OpenCodeFree catalog sync: keeps the enabled free list aligned
-		// with the gateway's live /models so a 6-model outage (2026-08-19) cannot
-		// recur without operator intervention. No-op when the gateway is unconfigured.
-		models.StartOpenCodeFreeSync(rootCtx, time.Hour)
-		// Startup capability-metadata check: a reasoning model whose profile cannot
-		// express any level (e.g. levels=[none] with zero_allowed=false) answers 501
-		// to every effort request. Log the offenders so the operator can PATCH them;
-		// nothing is auto-written (2026-08-25 llama incident).
-		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if broken, ids, err := models.CountUnexpressibleReasoningProfiles(checkCtx); err != nil {
-			resolved.Logger.Warn("reasoning profile consistency check failed", "error", err)
-		} else if broken > 0 {
-			resolved.Logger.Warn("reasoning models with unexpressible profiles found",
-				"count", broken, "public_ids", strings.Join(ids, ","))
-		}
-		checkCancel()
-		// Periodic capability probe (migration 045): re-runs the detailed probe so
-		// tools/reasoning metadata tracks the upstream instead of drifting. The
-		// enabled flag is read per cycle from runtime settings, so toggling it in
-		// the admin panel takes effect without a restart.
-		capabilityProbe := modelcatalog.NewCapabilityProbeRunner(models, resolved.Logger)
-		go capabilityProbe.Start(rootCtx, time.Duration(probeIntervalHours(settings.Snapshot().CapabilityProbeIntervalHours))*time.Hour, func() bool {
-			return settings.Snapshot().CapabilityProbeEnabled
-		})
-	}
+	checkCancel()
+	// Periodic capability probe (migration 045): re-runs the detailed probe so
+	// tools/reasoning metadata tracks the upstream instead of drifting. The
+	// enabled flag is read per cycle from runtime settings, so toggling it in
+	// the admin panel takes effect without a restart.
+	capabilityProbe := modelcatalog.NewCapabilityProbeRunner(models, resolved.Logger)
+	go capabilityProbe.Start(rootCtx, time.Duration(probeIntervalHours(settings.Snapshot().CapabilityProbeIntervalHours))*time.Hour, func() bool {
+		return settings.Snapshot().CapabilityProbeEnabled
+	})
+}
 
 func (a *App) Handler() http.Handler {
 	return a.handler

@@ -69,8 +69,8 @@ func TestChatOmitsOptionalEntryAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
-		defer func() { _ = response.Body.Close() }()
-	}
+	defer func() { _ = response.Body.Close() }()
+}
 
 func TestClientSetsOpencodeUserAgentAndSessionHeader(t *testing.T) {
 	var gotUA, gotSession, gotClient string

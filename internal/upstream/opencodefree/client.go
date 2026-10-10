@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -99,13 +100,13 @@ func IsValidSessionID(id string) bool {
 	}
 	for i := 4; i < 16; i++ {
 		c := id[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}
 	for i := 16; i < 30; i++ {
 		c := id[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 			return false
 		}
 	}
@@ -287,12 +288,22 @@ func (c *Client) do(ctx context.Context, snapshot runtimeconfig.Snapshot, method
 			ctx = WithSession(ctx, generated)
 		}
 	}
-		if c.local || c.proxy == nil || !c.proxy.Configured() || strings.Contains(c.baseURL, "opencode.ai") {
+	// A gateway on this host or the private network is unreachable from an exit,
+	// so no proxy can dial it: that case stays direct. Every public upstream must
+	// leave through the pool — the upstream applies per-IP rate limits, so a
+	// single origin address attracts 429s that a rotating exit set spreads out.
+	// Falling back to a direct dial when the pool is unconfigured or disabled
+	// would silently leak the host address and re-introduce those limits, so it
+	// is an explicit failure instead.
+	if c.local {
 		request, err := c.newRequest(ctx, method, path, body, stream)
 		if err != nil {
 			return nil, err
 		}
 		return c.httpClient.Do(request)
+	}
+	if c.proxy == nil || !c.proxy.Configured() {
+		return nil, xkproxy.NewTransportError(errors.New("OpenCodeFree requires the proxy pool to be configured"))
 	}
 	if !c.proxy.Enabled() {
 		return nil, xkproxy.NewTransportError(errors.New("proxy is disabled"))
@@ -334,18 +345,40 @@ func (c *Client) attemptThroughProxy(ctx context.Context, snapshot runtimeconfig
 	started := time.Now()
 	response, err := httpClient.Do(request)
 	if response != nil {
-		switch {
-		case response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices:
-			// CONNECT plus a 2xx header proves this exit carries gateway traffic:
-			// feed first-byte quality and clear any isolation window.
+		if response.Body == nil {
+			handle.Release()
+			if err == nil {
+				err = errors.New("OpenCodeFree proxy transport returned response without body")
+			}
+			return nil, wrote.Load(), err
+		}
+		if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+			// The response header marks the network-observable first-byte point;
+			// body generation time must never influence proxy exit ranking.
 			handle.ReportRequestLatency(time.Since(started))
-			handle.ReportLatency(0)
+		}
+		// The exit is only credited once the body has actually been consumed: a
+		// 2xx header proves CONNECT worked, not that the stream survived. Holding
+		// the release until body close also keeps the handle alive for the
+		// transfer. A long stream that breaks mid-flight now reports a request
+		// failure, so a throttled or half-broken exit is demoted instead of being
+		// ranked as the fastest healthy one forever.
+		response.Body = newPooledBody(response.Body, handle.Release, func() {
+			if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+				handle.ReportLatency(0)
+			}
+		}, handle.ReportRequestFailure)
+		if err != nil {
+			_ = response.Body.Close()
+			return nil, wrote.Load(), err
+		}
+		switch {
 		case response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError:
 			// Throttling and server failures may be specific to this exit, so let
 			// the pool isolate it rather than keep ranking it as healthy.
 			handle.ReportHTTPFailure(response.StatusCode)
 		}
-		return response, wrote.Load(), err
+		return response, wrote.Load(), nil
 	}
 	// Nothing came back at all. Only a failure before the request left the wire
 	// points at the exit; a gateway that hangs up mid-flight would otherwise let
@@ -398,6 +431,65 @@ type modelEnvelope struct {
 
 type modelRecord struct {
 	ID string `json:"id"`
+}
+
+// pooledBody owns the pooled handle for the lifetime of an upstream response.
+// The handle is released exactly once, and the terminal outcome is reported
+// exactly once: onComplete when the body reaches EOF normally, onFailure when
+// the read fails partway. Without this wrapper a pooled exit would be judged
+// only by its response headers, so a stream that broke mid-transfer would leave
+// a broken exit ranked as healthy.
+type pooledBody struct {
+	io.ReadCloser
+	release     func()
+	onComplete  func()
+	onFailure   func()
+	releaseOnce sync.Once
+	terminal    atomic.Uint32
+}
+
+func newPooledBody(body io.ReadCloser, release func(), onComplete func(), onFailure func()) *pooledBody {
+	return &pooledBody{ReadCloser: body, release: release, onComplete: onComplete, onFailure: onFailure}
+}
+
+func (b *pooledBody) Read(payload []byte) (int, error) {
+	read, err := b.ReadCloser.Read(payload)
+	switch {
+	case err == io.EOF:
+		b.completeTerminal()
+	case err != nil:
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// A cancelled transfer says nothing about the exit: the client or the
+			// router gave up, not the upstream.
+			return read, err
+		}
+		b.failTerminal()
+	}
+	return read, err
+}
+
+func (b *pooledBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.releaseOnce.Do(b.release)
+	return err
+}
+
+func (b *pooledBody) completeTerminal() {
+	if !b.terminal.CompareAndSwap(0, 1) {
+		return
+	}
+	if b.onComplete != nil {
+		b.onComplete()
+	}
+}
+
+func (b *pooledBody) failTerminal() {
+	if !b.terminal.CompareAndSwap(0, 2) {
+		return
+	}
+	if b.onFailure != nil {
+		b.onFailure()
+	}
 }
 
 func parseModels(body []byte) ([]string, error) {

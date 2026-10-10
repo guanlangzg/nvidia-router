@@ -216,18 +216,18 @@ func (r *Repository) Patch(ctx context.Context, id int64, patch Patch, now time.
 		return Model{}, "", fmt.Errorf("validate model patch provider: %w", err)
 	}
 	updatedAt := formatRevisionTime(now, model.updatedAt)
-		result, err := tx.ExecContext(ctx, `UPDATE models SET upstream_id = ?, display_name = ?, kind = ?, enabled = ?, supports_vision = ?, supports_tools = ?, tools_status = ?, tools_verified_at = ?, supports_reasoning = ?, reasoning_status = ?, reasoning_wire_format = ?, reasoning_levels = ?, reasoning_min_budget = ?, reasoning_max_budget = ?, reasoning_zero_allowed = ?, reasoning_dynamic_allowed = ?, capability_verified_at = ?,
+	result, err := tx.ExecContext(ctx, `UPDATE models SET upstream_id = ?, display_name = ?, kind = ?, enabled = ?, supports_vision = ?, supports_tools = ?, tools_status = ?, tools_verified_at = ?, supports_reasoning = ?, reasoning_status = ?, reasoning_wire_format = ?, reasoning_levels = ?, reasoning_min_budget = ?, reasoning_max_budget = ?, reasoning_zero_allowed = ?, reasoning_dynamic_allowed = ?, capability_verified_at = ?,
 			provider = CASE WHEN ? IS NULL THEN provider ELSE ? END,
 			stream_first_token_timeout_ms = CASE WHEN ? IS NULL THEN stream_first_token_timeout_ms ELSE ? END,
 			stream_idle_timeout_ms        = CASE WHEN ? IS NULL THEN stream_idle_timeout_ms        ELSE ? END,
 			context_length                = CASE WHEN ? IS NULL THEN context_length                ELSE ? END,
 			updated_at = ? WHERE id = ?`,
-			selection.UpstreamID, selection.DisplayName, selection.Kind, boolInt(selection.Enabled), boolInt(selection.SupportsVision), boolInt(selection.SupportsTools), selection.ToolsStatus, optionalTimestamp(selection.ToolsVerifiedAt), boolInt(selection.SupportsReasoning), selection.ReasoningStatus, selection.ReasoningWireFormat, mustReasoningLevelsJSON(selection.ReasoningLevels), selection.ReasoningMinBudget, selection.ReasoningMaxBudget, boolInt(selection.ReasoningZeroAllowed), boolInt(selection.ReasoningDynamicAllowed), optionalTimestamp(selection.CapabilityVerifiedAt),
-			patch.Provider, patchDerefString(patch.Provider),
-			patch.StreamFirstTokenTimeoutMS, patchDerefInt(patch.StreamFirstTokenTimeoutMS),
-			patch.StreamIdleTimeoutMS, patchDerefInt(patch.StreamIdleTimeoutMS),
-			patch.ContextLength, patchDerefInt(patch.ContextLength),
-			updatedAt, id)
+		selection.UpstreamID, selection.DisplayName, selection.Kind, boolInt(selection.Enabled), boolInt(selection.SupportsVision), boolInt(selection.SupportsTools), selection.ToolsStatus, optionalTimestamp(selection.ToolsVerifiedAt), boolInt(selection.SupportsReasoning), selection.ReasoningStatus, selection.ReasoningWireFormat, mustReasoningLevelsJSON(selection.ReasoningLevels), selection.ReasoningMinBudget, selection.ReasoningMaxBudget, boolInt(selection.ReasoningZeroAllowed), boolInt(selection.ReasoningDynamicAllowed), optionalTimestamp(selection.CapabilityVerifiedAt),
+		patch.Provider, patchDerefString(patch.Provider),
+		patch.StreamFirstTokenTimeoutMS, patchDerefInt(patch.StreamFirstTokenTimeoutMS),
+		patch.StreamIdleTimeoutMS, patchDerefInt(patch.StreamIdleTimeoutMS),
+		patch.ContextLength, patchDerefInt(patch.ContextLength),
+		updatedAt, id)
 	if err != nil {
 		return Model{}, "", fmt.Errorf("save model patch: %w", err)
 	}
