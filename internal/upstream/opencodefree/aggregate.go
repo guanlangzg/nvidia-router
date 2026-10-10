@@ -34,7 +34,14 @@ type sseChunkDelta struct {
 	Role             string             `json:"role"`
 	Content          string             `json:"content"`
 	ReasoningContent string             `json:"reasoning_content"`
-	ToolCalls        []sseChunkToolCall `json:"tool_calls"`
+	// Upstreams in this family are inconsistent about the thinking field name:
+	// the stream can carry "reasoning" or "thinking" for content the protocol
+	// layer already treats as equivalent aliases. Reading only reasoning_content
+	// silently drops the whole reasoning trace on a non-streaming call while the
+	// streaming path keeps it.
+	Reasoning string             `json:"reasoning"`
+	Thinking  string             `json:"thinking"`
+	ToolCalls []sseChunkToolCall `json:"tool_calls"`
 }
 
 type sseChunkToolCall struct {
@@ -99,8 +106,15 @@ func (agg *sseAggregate) absorb(data []byte) {
 		if choice.Delta.Content != "" {
 			agg.content.WriteString(choice.Delta.Content)
 		}
-		if choice.Delta.ReasoningContent != "" {
+		// Alias priority matches the streaming decoder: reasoning_content first,
+		// then reasoning, then thinking. A frame normally carries only one.
+		switch {
+		case choice.Delta.ReasoningContent != "":
 			agg.reasoning.WriteString(choice.Delta.ReasoningContent)
+		case choice.Delta.Reasoning != "":
+			agg.reasoning.WriteString(choice.Delta.Reasoning)
+		case choice.Delta.Thinking != "":
+			agg.reasoning.WriteString(choice.Delta.Thinking)
 		}
 		for _, tc := range choice.Delta.ToolCalls {
 			slot, exists := agg.toolCalls[tc.Index]

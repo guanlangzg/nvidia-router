@@ -1,7 +1,9 @@
 package v1
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"nvidia-router/internal/apierror"
 	"nvidia-router/internal/fault"
@@ -211,15 +214,16 @@ func openCodeFreeRetryableCallbackError(err error) bool {
 
 func classifyOpenCodeFreeStatus(response *http.Response, allowRetry bool) (bool, time.Duration, error) {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+	// Two views of the same body: the raw text drives the local heuristics below
+	// (retry wording, relayed-provider detection), while the public message is
+	// scrubbed. An upstream error body can carry internal hostnames, request URLs
+	// with query credentials, or provider stack traces, so it is never forwarded
+	// verbatim to a client.
 	message := strings.TrimSpace(string(body))
-	if message == "" {
-		message = fmt.Sprintf("OpenCodeFree upstream returned HTTP %d", response.StatusCode)
-	} else if len(message) > 512 {
-		message = message[:512]
-	}
+	publicMessage := sanitizeUpstreamErrorBody(body, response.StatusCode)
 	if response.StatusCode == http.StatusNotFound {
 		return false, 0, &apierror.Error{
-			Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_model_not_found", Message: message,
+			Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_model_not_found", Message: publicMessage,
 		}
 	}
 	if response.StatusCode == http.StatusTooManyRequests || isOpenCodeFreeTransientStatus(response.StatusCode) {
@@ -235,14 +239,14 @@ func classifyOpenCodeFreeStatus(response *http.Response, allowRetry bool) (bool,
 		if status == http.StatusInternalServerError || status == 436 {
 			status = http.StatusBadGateway
 		}
-		mapped := fault.New(status, fault.ScopeUpstreamGlobal, "server_error", "upstream_unavailable", message, nil)
+		mapped := fault.New(status, fault.ScopeUpstreamGlobal, "server_error", "upstream_unavailable", publicMessage, nil)
 		if retry {
 			return true, delay, mapped
 		}
 		return false, 0, mapped
 	}
 	mapped := &apierror.Error{
-		Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_error", Message: message,
+		Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_error", Message: publicMessage,
 	}
 	// The OpenCode provider layer wraps its own failures — transient ones
 	// included — as a 400 invalid_request_error carrying "Error from provider".
@@ -273,4 +277,79 @@ func isOpenCodeFreeTransientStatus(status int) bool {
 	default:
 		return false
 	}
+}
+
+// maxPublicUpstreamMessage bounds how much upstream error text reaches a client.
+const maxPublicUpstreamMessage = 200
+
+// sanitizeUpstreamErrorBody converts an upstream error body into a short, safe
+// description. Only an explicit message field is extracted and scrubbed; a body
+// that looks like a URL, a markup dump, or anything else unrecognized collapses
+// to a generic status line rather than being echoed.
+func sanitizeUpstreamErrorBody(body []byte, status int) string {
+	fallback := fmt.Sprintf("OpenCodeFree upstream returned HTTP %d", status)
+	text := extractUpstreamMessage(body)
+	if text == "" {
+		return fallback
+	}
+	if scrubbed := scrubUpstreamMessage(text); scrubbed != "" {
+		return scrubbed
+	}
+	return fallback
+}
+
+func extractUpstreamMessage(body []byte) string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || !utf8.Valid(trimmed) {
+		return ""
+	}
+	var envelope struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal(trimmed, &envelope) == nil {
+		if envelope.Message != "" {
+			return envelope.Message
+		}
+		if len(envelope.Error) > 0 {
+			var nested struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(envelope.Error, &nested) == nil && nested.Message != "" {
+				return nested.Message
+			}
+			var flat string
+			if json.Unmarshal(envelope.Error, &flat) == nil && flat != "" {
+				return flat
+			}
+		}
+		return ""
+	}
+	// A plain-text body is only usable when it looks like prose rather than a
+	// serialized structure.
+	if bytes.ContainsAny(trimmed, "<>{}") {
+		return ""
+	}
+	return string(trimmed)
+}
+
+// scrubUpstreamMessage normalizes whitespace and caps the length, rejecting
+// anything that still carries a URL shape (which may embed credentials).
+func scrubUpstreamMessage(message string) string {
+	var out strings.Builder
+	for _, character := range message {
+		if character < 0x20 || character == 0x7f {
+			out.WriteByte(' ')
+			continue
+		}
+		out.WriteRune(character)
+	}
+	scrubbed := strings.Join(strings.Fields(out.String()), " ")
+	if len(scrubbed) > maxPublicUpstreamMessage {
+		scrubbed = scrubbed[:maxPublicUpstreamMessage]
+	}
+	if strings.Contains(scrubbed, "://") {
+		return ""
+	}
+	return scrubbed
 }

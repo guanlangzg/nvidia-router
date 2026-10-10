@@ -539,3 +539,20 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
   - 3756 `/health/live` 与 `/health/ready` 返回 200；
   - 真实 Coding-agent 编程测试（`ocf_programming_probe_remote.py`）：非流式（MODE=chat）与流式（MODE=stream）在 `space-bunny-free` 与 `step-5-preview-free` 上驱动 5-7 轮完整工具交互（list/read/write/run_tests）全部达成 `solved=true`（unittest 2 失败 -> 全部通过 OK），代码修改真实生效且参数 JSON 零畸变。
 
+## 46. 2026-10-09 全量深度代码审查（只读，未改代码）
+
+- 报告：`docs/2026-10-09-深度代码审查与架构优化报告.md`。审查 HEAD `0df2768`，规模 370 个 Go 源文件（后端非测试约 34.3k 行）+ 197 个 Go 测试 + 160 个前端文件。方式为 6 路并行子代理扫描 + 关键结论人工逐行复核。
+- **方法论教训（重要）**：子代理报告必须抽样人工复核后再据以排期。本轮已实证存在 **误报**（其报的“代理池上游凭据经 `/admin/api/proxy-pool/refresh` 回显”不成立：refresh 返回固定文案、status 只暴露白名单 `LastErrorCode`、`xkproxy.ErrorCode()` 对非 ProviderError 返回空、`writeInternalError` 不外发 cause）与 **多处严重度偏高**（全局 body 预算信号量实为注释充分的设计取舍；前端桌面/移动双份挂载属常见取舍）。复核规则：先看被引用的那一行是否恰是脱敏/正常代码。
+- **已逐行复核的高优先级缺陷（未修复，待排期）**：
+  - `scripts/deploy/deploy_native.py:74,82,92`：覆盖生产二进制前不备份旧二进制、从不备份 router.db、校验失败仍 `return 0`；`run()` 先读 stdout 再读 stderr（§37 记载过的 paramiko 死锁成因仍在）。无发布前门禁。**本轮风险最高项**。
+  - `internal/app/app.go:346,363-366` + `internal/app/shutdown.go:89-151`：`StartOpenCodeFreeSync` 与 `capabilityProbe` 无 done 通道，`finishShutdown` 不等待即关库；`rootCancel()` 仅发信号不等待退出，存在“关库后写库”竞态。
+  - `internal/xkproxy/pool.go:574-616`（`ReportFailure`）对比 `656-719`（`ReportHTTPFailure`）：传输层失败**无时间窗防抖、无“全池近期有 2xx”门控、无计数饱和**，而 HTTP 侧三者齐备。池仅 2~4 出口时并发抖动可瞬时击穿 `MaxEjections` 永久清空池。
+  - `internal/xkproxy/manager.go:305-327`：Rebuild 路径无条件覆盖 `m.transports[key]`，并发 rebuild 时先前 transport 被孤儿化且永不关闭（cache-miss 路径 356-359 有正确放弃逻辑，Rebuild 漏了）。
+  - `internal/upstream/opencodefree/aggregate.go:33-38,102-104`：非流式聚合只认 `reasoning_content`，而 `internal/protocol/responses/delta.go:31-33` 把 `reasoning_content`/`reasoning`/`thinking` 当等价别名——同上游两种调用形态不一致。
+  - `internal/observability/http.go:237-251`：`appendTail` 超 64KB 后**每个 chunk** 分配+拷贝 64KB，长流产生数十 MB 短命垃圾。
+  - `internal/xkproxy/collector.go:159,171,425-517`：`Close()` 只在两次 fetch 之间看 `c.done`，进行中的 fetch/validate 只监听传入 ctx，最坏阻塞约 27s（3×4s + 3×5s + 2×0.5s）。
+  - `internal/httpapi/v1/opencodefree_execution.go:212-223`：上游错误原文（≤512 字符）未经清洗回显客户端；NVIDIA 侧有 `fault` 白名单脱敏而 OCF 侧缺失。
+  - `internal/app/app.go:169-172` 与 `internal/upstream/opencodefree/client.go:290`：装配层 `WithProxy(proxy)` 并注释“走同一出口池”，客户端却因 `baseURL` 含 `opencode.ai` 静默直连——意图与实现冲突，须二选一并统一。
+  - `internal/httpapi/admin/models.go:71-74,92-95,119-122` 与 `web/src/features/models/types.ts`：后端仍序列化 `reasoning_levels`/`reasoning_min_budget`/`reasoning_max_budget`/`reasoning_zero_allowed`/`reasoning_dynamic_allowed`，前端零引用；结合 §41 纯透传重构后这些字段运行时已无效果，属前后端共同死字段。
+- **确认健康、无需动的部分**：Go 直接依赖仅 2 个；SQLite 写库 `MaxOpenConns(1)`+`_txlock=immediate`、读库 `mode=ro` 独立池；`BufferRecorder` 队列满即丢且计数、不阻塞热路径；Prometheus 无动态 label；领域层不反向依赖 httpapi/app；管理 API 错误路径脱敏完整。
+
