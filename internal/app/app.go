@@ -61,27 +61,29 @@ type App struct {
 	proxySettings   *xkproxy.SettingsService
 	nvidiaClient    *nvidia.Client
 
-	db               *sql.DB
-	dbReader         *sql.DB
-	dbLock           *processlock.Lock
-	handler          http.Handler
-	requestRecorder  *observability.BufferRecorder
-	healthChecker    *nvidiakey.HealthChecker
-	shutting         atomic.Bool
-	cleanupCancel    context.CancelFunc
-	cleanupDone      chan struct{}
-	recorderCancel   context.CancelFunc
-	recorderDone     chan struct{}
-	healthCancel     context.CancelFunc
-	healthDone       chan struct{}
-	modelHealthDone  <-chan struct{}
-	rootCancel       context.CancelFunc
-	shutdownOnce     sync.Once
-	shutdownGrace    time.Duration
-	shutdownTimer    *time.Timer
-	shutdownDeadline time.Time
-	close            sync.Once
-	closeErr         error
+	db                  *sql.DB
+	dbReader            *sql.DB
+	dbLock              *processlock.Lock
+	handler             http.Handler
+	requestRecorder     *observability.BufferRecorder
+	healthChecker       *nvidiakey.HealthChecker
+	shutting            atomic.Bool
+	cleanupCancel       context.CancelFunc
+	cleanupDone         chan struct{}
+	recorderCancel      context.CancelFunc
+	recorderDone        chan struct{}
+	healthCancel        context.CancelFunc
+	healthDone          chan struct{}
+	modelHealthDone     <-chan struct{}
+	ocfSyncDone         <-chan struct{}
+	capabilityProbeDone <-chan struct{}
+	rootCancel          context.CancelFunc
+	shutdownOnce        sync.Once
+	shutdownGrace       time.Duration
+	shutdownTimer       *time.Timer
+	shutdownDeadline    time.Time
+	close               sync.Once
+	closeErr            error
 }
 
 func New(ctx context.Context, dependencies Dependencies) (*App, error) {
@@ -343,7 +345,7 @@ func (a *App) startBackgroundWorkers(
 	// Periodic OpenCodeFree catalog sync: keeps the enabled free list aligned
 	// with the gateway's live /models so a 6-model outage (2026-08-19) cannot
 	// recur without operator intervention. No-op when the gateway is unconfigured.
-	models.StartOpenCodeFreeSync(rootCtx, time.Hour)
+	a.ocfSyncDone = models.StartOpenCodeFreeSync(rootCtx, time.Hour)
 	// Startup capability-metadata check: a reasoning model whose profile cannot
 	// express any level (e.g. levels=[none] with zero_allowed=false) answers 501
 	// to every effort request. Log the offenders so the operator can PATCH them;
@@ -361,7 +363,7 @@ func (a *App) startBackgroundWorkers(
 	// enabled flag is read per cycle from runtime settings, so toggling it in
 	// the admin panel takes effect without a restart.
 	capabilityProbe := modelcatalog.NewCapabilityProbeRunner(models, resolved.Logger)
-	go capabilityProbe.Start(rootCtx, time.Duration(probeIntervalHours(settings.Snapshot().CapabilityProbeIntervalHours))*time.Hour, func() bool {
+	a.capabilityProbeDone = capabilityProbe.Start(rootCtx, time.Duration(probeIntervalHours(settings.Snapshot().CapabilityProbeIntervalHours))*time.Hour, func() bool {
 		return settings.Snapshot().CapabilityProbeEnabled
 	})
 }

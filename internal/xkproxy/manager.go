@@ -312,8 +312,17 @@ func (m *Manager) Acquire(ctx context.Context, snapshot runtimeconfig.Snapshot, 
 				m.mu.Unlock()
 				return nil, &Error{reason: ReasonManagerClosed}
 			}
-			// Double-check entry still same.
-			if cur, ok := m.transports[key]; ok && cur.transport == transport {
+			// Double-check entry still same. Another goroutine may have rebuilt
+			// or replaced the entry while we cloned outside the lock.
+			if cur, ok := m.transports[key]; ok {
+				if cur.transport != transport {
+					// Another goroutine already installed a new entry; abandon our
+					// clone to avoid orphaned transports and connection leaks.
+					transport2.CloseIdleConnections()
+					cur.lastUsed.Store(m.clock.Add(1))
+					m.mu.Unlock()
+					return &Handle{manager: m, key: key, transport: cur.transport, proxyKey: cur.proxyKey}, nil
+				}
 				cur.transport.CloseIdleConnections()
 			}
 			newEntry := &cachedTransport{transport: transport2, proxyKey: selectedProxy.Key(), createdAt: now}

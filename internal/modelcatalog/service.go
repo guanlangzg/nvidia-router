@@ -697,17 +697,20 @@ func (s *Service) SyncOpenCodeFreeModels(ctx context.Context) (int, error) {
 }
 
 // StartOpenCodeFreeSync runs a background loop that periodically calls
-// SyncOpenCodeFreeModels. It stops when ctx is canceled. The interval is
-// deliberately long (1h) because the gateway's free list changes at most daily
+// SyncOpenCodeFreeModels. It stops when ctx is canceled and closes the returned channel.
+// The interval is deliberately long (1h) because the gateway's free list changes at most daily
 // and each run touches the DB for every enabled free model.
-func (s *Service) StartOpenCodeFreeSync(ctx context.Context, interval time.Duration) {
+func (s *Service) StartOpenCodeFreeSync(ctx context.Context, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
 	if isNilOpenCodeFreeClient(s.opencodefree) {
-		return
+		close(done)
+		return done
 	}
 	if interval <= 0 {
 		interval = time.Hour
 	}
 	go func() {
+		defer close(done)
 		// Initial jitter so a fleet restart does not hammer the gateway at once.
 		jitter := time.Duration(0)
 		if interval > time.Minute {
@@ -742,6 +745,7 @@ func (s *Service) StartOpenCodeFreeSync(ctx context.Context, interval time.Durat
 			}
 		}
 	}()
+	return done
 }
 
 func candidateFromHint(modelID string, hint nvidia.CapabilityHint) Candidate {

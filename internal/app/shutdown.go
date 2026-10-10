@@ -126,6 +126,24 @@ func (a *App) finishShutdown() error {
 		)
 	}
 
+	if a.ocfSyncDone != nil {
+		componentStart := time.Now()
+		<-a.ocfSyncDone
+		logger.Info("shutdown_component",
+			"component", "opencodefree_sync",
+			"duration_ms", time.Since(componentStart).Milliseconds(),
+		)
+	}
+
+	if a.capabilityProbeDone != nil {
+		componentStart := time.Now()
+		<-a.capabilityProbeDone
+		logger.Info("shutdown_component",
+			"component", "capability_probe",
+			"duration_ms", time.Since(componentStart).Milliseconds(),
+		)
+	}
+
 	// Close the reader pool before the writer: readers hold WAL read locks that
 	// would otherwise make the writer's final checkpoint contend.
 	if a.dbReader != nil {

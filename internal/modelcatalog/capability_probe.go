@@ -28,8 +28,11 @@ func NewCapabilityProbeRunner(service *Service, logger *slog.Logger) *Capability
 
 // Start launches the blocking probe loop; cancel ctx to stop it. The first run
 // waits one full interval so a restart does not immediately fan out probes.
-func (r *CapabilityProbeRunner) Start(ctx context.Context, interval time.Duration, enabled func() bool) {
+// It closes the returned channel once the loop exits.
+func (r *CapabilityProbeRunner) Start(ctx context.Context, interval time.Duration, enabled func() bool) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		timer := time.NewTimer(interval)
 		defer timer.Stop()
 		for {
@@ -61,6 +64,7 @@ func (r *CapabilityProbeRunner) Start(ctx context.Context, interval time.Duratio
 			timer.Reset(interval)
 		}
 	}()
+	return done
 }
 
 type probeCycleSummary struct {

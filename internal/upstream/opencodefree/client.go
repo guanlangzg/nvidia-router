@@ -49,6 +49,22 @@ const (
 
 type sessionCtxKey struct{}
 type userAgentCtxKey struct{}
+type retryAttemptCtxKey struct{}
+
+// WithRetryAttempt associates the execution attempt index with the context so
+// retries can obtain a fresh exit proxy from the pool.
+func WithRetryAttempt(ctx context.Context, attempt int) context.Context {
+	return context.WithValue(ctx, retryAttemptCtxKey{}, attempt)
+}
+
+// RetryAttemptFrom retrieves the retry attempt index from context, if present.
+func RetryAttemptFrom(ctx context.Context) (int, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	val, ok := ctx.Value(retryAttemptCtxKey{}).(int)
+	return val, ok
+}
 
 // WithSession associates an OpenCodeFree session ID with the context for session affinity.
 func WithSession(ctx context.Context, sessionID string) context.Context {
@@ -327,7 +343,14 @@ func (c *Client) do(ctx context.Context, snapshot runtimeconfig.Snapshot, method
 }
 
 func (c *Client) attemptThroughProxy(ctx context.Context, snapshot runtimeconfig.Snapshot, request *http.Request) (*http.Response, bool, error) {
-	handle, err := xkproxy.AcquireWithWait(ctx, c.proxy, snapshot, c.session, proxyWaitBudget)
+	sessionKey := c.session
+	if sessionID, ok := SessionFrom(ctx); ok && sessionID != "" {
+		sessionKey = sessionID
+	}
+	if attempt, ok := RetryAttemptFrom(ctx); ok && attempt > 0 {
+		sessionKey = fmt.Sprintf("%s_try%d", sessionKey, attempt)
+	}
+	handle, err := xkproxy.AcquireWithWait(ctx, c.proxy, snapshot, sessionKey, proxyWaitBudget)
 	if err != nil {
 		return nil, false, err
 	}

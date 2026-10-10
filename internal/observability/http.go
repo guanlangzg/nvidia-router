@@ -28,6 +28,7 @@ const usageCaptureLimit = 2 << 20
 // and any stream that exceeded that limit dropped its usage entirely. A bounded
 // tail is both far cheaper and strictly more capable.
 const usageTailCaptureLimit = 64 << 10
+const usageTailCaptureThreshold = 2 * usageTailCaptureLimit
 
 var usageCaptureEndpoints = map[string]struct{}{
 	"/v1/chat/completions": {},
@@ -234,9 +235,11 @@ func (w *trackingWriter) disableCaptureIfIneligible() {
 // at an event boundary so the retained window starts on a whole event; a
 // half-event at the front would be skipped by lastSSEEventData anyway, but
 // trimming keeps the buffer's contents meaningful on inspection.
+// Trimming triggers only once the buffer exceeds usageTailCaptureThreshold,
+// amortizing the allocation and copy cost so long streams do not churn heap on every chunk.
 func (w *trackingWriter) appendTail(payload []byte) {
 	_, _ = w.body.Write(payload)
-	if w.body.Len() <= usageTailCaptureLimit {
+	if w.body.Len() <= usageTailCaptureThreshold {
 		return
 	}
 	retained := w.body.Bytes()[w.body.Len()-usageTailCaptureLimit:]

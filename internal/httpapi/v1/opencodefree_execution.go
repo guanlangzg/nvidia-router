@@ -16,6 +16,7 @@ import (
 
 	"nvidia-router/internal/apierror"
 	"nvidia-router/internal/fault"
+	"nvidia-router/internal/upstream/opencodefree"
 )
 
 const openCodeFreeRetryDelay = 500 * time.Millisecond
@@ -50,7 +51,8 @@ func (e openCodeFreeExecution) run(parent context.Context, stream bool, tracker 
 		tracker = &firstWriteTracker{}
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		ctx, cancel := context.WithTimeout(parent, openCodeFreeRequestTimeout)
+		attemptCtx := opencodefree.WithRetryAttempt(parent, attempt)
+		ctx, cancel := context.WithTimeout(attemptCtx, openCodeFreeRequestTimeout)
 		response, err := e.call(ctx, stream)
 		if err != nil {
 			if response != nil && response.Body != nil {

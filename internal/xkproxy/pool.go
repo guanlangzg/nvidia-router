@@ -52,6 +52,11 @@ const httpEjectSuccessWindow = 60 * time.Second
 // be ejected on a pattern it never actually maintained.
 const httpFailureWindow = 60 * time.Second
 
+// transportFailureWindow bounds how long an exit's transport failure count is
+// allowed to accumulate without fresh failures. An exit that failed an hour ago
+// and fails again today is not experiencing consecutive connection failures.
+const transportFailureWindow = 60 * time.Second
+
 // httpStatusOverloaded is NVIDIA's "overloaded" status. It describes the
 // target's own load, not the exit: it recurs across every exit at once, so an
 // exit must never be blamed for it (see ReportHTTPFailure).
@@ -586,11 +591,21 @@ func (p *Pool) ReportFailure(identity string, now time.Time, policy EjectionPoli
 			continue
 		}
 
+		prevFailureAt := proxy.LastFailureAt
 		proxy.FailureCount++
 		proxy.RequestFailureCount++
 		proxy.RequestFailureStreak++
-		proxy.HealthFails++
 		proxy.LastFailureAt = now
+
+		// Forget failures older than the window before counting this one: an
+		// exit that failed twice an hour ago and fails again now is not
+		// "three consecutive failures".
+		if !prevFailureAt.IsZero() && now.Sub(prevFailureAt) > transportFailureWindow {
+			proxy.HealthFails = 1
+		} else if proxy.HealthFails < policy.FailureLimit {
+			proxy.HealthFails++
+		}
+
 		if proxy.HealthFails < policy.FailureLimit {
 			survivors = append(survivors, proxy)
 			continue

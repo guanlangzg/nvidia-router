@@ -290,7 +290,7 @@ func TestMergeRefreshesProxyExpiryOnRepeatedFetches(t *testing.T) {
 
 	later := now.Add(1 * time.Minute)
 	// Second fetch returns the same proxy with a refreshed TTL.
-	pool.Merge(later, []Proxy{Proxy{
+	pool.Merge(later, []Proxy{{
 		Scheme: "http", Address: "10.0.0.1:8080", FetchedAt: later, ExpiresAt: later.Add(2 * time.Minute),
 	}})
 
@@ -388,7 +388,7 @@ func TestPoolDoesNotResurrectPermanentlyEjectedProxy(t *testing.T) {
 	// The next fetch returns the same proxy; it must not be re-admitted while the
 	// removal cooldown is active.
 	refetch := now.Add(time.Minute)
-	pool.Merge(refetch, []Proxy{Proxy{
+	pool.Merge(refetch, []Proxy{{
 		Scheme: "http", Address: "192.168.1.1:8080", FetchedAt: refetch, ExpiresAt: refetch.Add(2 * time.Minute),
 	}})
 	if _, ok := pool.Peek(refetch); ok {
@@ -397,7 +397,7 @@ func TestPoolDoesNotResurrectPermanentlyEjectedProxy(t *testing.T) {
 
 	// After the cooldown expires the proxy is admitted again on a fresh fetch.
 	later := now.Add(removalCooldown + time.Minute)
-	pool.Merge(later, []Proxy{Proxy{
+	pool.Merge(later, []Proxy{{
 		Scheme: "http", Address: "192.168.1.1:8080", FetchedAt: later, ExpiresAt: later.Add(2 * time.Minute),
 	}})
 	if _, ok := pool.Peek(later); !ok {

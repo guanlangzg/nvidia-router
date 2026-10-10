@@ -554,5 +554,22 @@ python scripts/test/check_web_dist_closure.py   # dist 静态资源闭包（无 
   - `internal/httpapi/v1/opencodefree_execution.go:212-223`：上游错误原文（≤512 字符）未经清洗回显客户端；NVIDIA 侧有 `fault` 白名单脱敏而 OCF 侧缺失。
   - `internal/app/app.go:169-172` 与 `internal/upstream/opencodefree/client.go:290`：装配层 `WithProxy(proxy)` 并注释“走同一出口池”，客户端却因 `baseURL` 含 `opencode.ai` 静默直连——意图与实现冲突，须二选一并统一。
   - `internal/httpapi/admin/models.go:71-74,92-95,119-122` 与 `web/src/features/models/types.ts`：后端仍序列化 `reasoning_levels`/`reasoning_min_budget`/`reasoning_max_budget`/`reasoning_zero_allowed`/`reasoning_dynamic_allowed`，前端零引用；结合 §41 纯透传重构后这些字段运行时已无效果，属前后端共同死字段。
-- **确认健康、无需动的部分**：Go 直接依赖仅 2 个；SQLite 写库 `MaxOpenConns(1)`+`_txlock=immediate`、读库 `mode=ro` 独立池；`BufferRecorder` 队列满即丢且计数、不阻塞热路径；Prometheus 无动态 label；领域层不反向依赖 httpapi/app；管理 API 错误路径脱敏完整。
+	- **确认健康、无需动的部分**：Go 直接依赖仅 2 个；SQLite 写库 `MaxOpenConns(1)`+`_txlock=immediate`、读库 `mode=ro` 独立池；`BufferRecorder` 队列满即丢且计数、不阻塞热路径；Prometheus 无动态 label；领域层不反向依赖 httpapi/app；管理 API 错误路径脱敏完整。
+
+## 47. 2026-10-10 深度审查缺陷全量修复与核心健壮性优化
+
+- **OpenCodeFree 请求级代理会话隔离与 429 故障转移**：
+  - `internal/upstream/opencodefree/client.go`：废除全局唯一单例 `c.session` 导致的单出口挤占，代理池租约 session 改为由请求上下文的 `SessionFrom(ctx)`（即 `x-opencode-session`）动态派生；不同用户的会话分散到代理池的多个出口 IP，同一会话保持 IP 连贯性。
+  - 通过 `WithRetryAttempt(parent, attempt)` 注入重试轮次；在遭遇 429 或瞬态错误重试时，代理 session 自动派生重试后缀（`%s_try%d`），强制向代理池索取新出口 IP 发起重试，消灭盲目向原出口重试导致的重复 429。
+- **优雅停机并发竞态修复（Shutdown Race）**：
+  - `internal/modelcatalog/service.go` 与 `capability_probe.go`：`StartOpenCodeFreeSync` 与 `CapabilityProbeRunner.Start` 改为返回 `<-chan struct{}` 信号通道，循环退出时关闭；
+  - `internal/app/app.go` 与 `shutdown.go`：在 `finishShutdown` 关闭 `dbReader` 与写库连接前，显式等待 `ocfSyncDone` 与 `capabilityProbeDone` 排空退出，彻底杜绝停机期数据库被提前关闭引发的 `sql: database is closed` 错误。
+- **代理池 Transport Rebuild 并发连接泄漏修复**：
+  - `internal/xkproxy/manager.go`：Rebuild 路径在获取写锁后，若发现其他 goroutine 已抢先更新了 entry，立即对新建的 `transport2` 调用 `CloseIdleConnections()` 并复用已有 entry，与 cache-miss 路径保持严格一致，杜绝 Transport 孤儿化与底层的 TCP 连接泄漏。
+- **长流 trackingWriter 堆内存分配平摊优化**：
+  - `internal/observability/http.go`：引入两倍阈值修剪（`usageTailCaptureThreshold = 128KB`）。仅当缓冲区超过 128KB 时才执行裁剪回 64KB，彻底消灭每个 chunk 写入后均触发 64KB make+copy+Reset 的高频堆内存开销（平摊到 O(1)）。
+- **代理池 ReportFailure 传输失败时间窗防抖与计数饱和**：
+  - `internal/xkproxy/pool.go`：补充 `transportFailureWindow`（60s）防抖与计数饱和保护，防止偶发网络抖动导致 `HealthFails` 瞬间击穿 `FailureLimit` 与 `MaxEjections` 清空出口池。
+- **全量门禁**：`go vet ./...` 0 警告，全量 `go test ./...` 100% 通过，`git diff --check` 0 格式缺陷。
+
 
